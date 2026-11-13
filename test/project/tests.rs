@@ -33,6 +33,8 @@ fn language_extensions() {
         ("a.css", "css"),
         ("a.mjs", "js"),
         ("a.tsx", "ts"),
+        ("a.mts", "ts"),
+        ("a.cts", "ts"),
         ("Main.java", "java"),
         ("a.py", "py"),
         ("lib.rs", "rs"),

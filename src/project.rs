@@ -166,6 +166,14 @@ impl Document {
         self.mtime = modified(&path);
         self.path = Some(path);
     }
+    /// The file to watch for changes on disk and the modification time it was read at; None for
+    /// a document without a file, a binary one, or one still being read.
+    pub fn disk_stamp(&self) -> Option<(&Path, Option<SystemTime>)> {
+        if self.binary || self.loading.is_some() {
+            return None;
+        }
+        Some((self.path.as_deref()?, self.mtime))
+    }
     /// True when the file was changed on disk since it was last read or written.
     pub fn changed_on_disk(&self) -> bool {
         if self.binary || self.loading.is_some() {
@@ -403,7 +411,7 @@ pub fn language(path: &Path) -> &'static str {
         "sass" => "sass",
         "less" => "less",
         "js" | "mjs" | "cjs" | "jsx" => "js",
-        "ts" | "tsx" => "ts",
+        "ts" | "tsx" | "mts" | "cts" => "ts",
         "java" => "java",
         "py" | "pyi" | "pyw" => "py",
         "rs" => "rs",
