@@ -1289,12 +1289,19 @@ impl EditorState {
         }
     }
 
-    /// Underlines the word that Ctrl+click would follow.
+    /// The word under the pointer that Ctrl+click would follow to its declaration.
+    pub(super) fn goto_link(&self) -> Option<&Range<usize>> {
+        let hover = &self.assist.goto_hover;
+        hover.word.as_ref().filter(|_| hover.link)
+    }
+
+    /// Underlines `word`, which Ctrl+click would follow, where it is on this line.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn link_underline(
         &self,
         painter: &Painter,
         text: &str,
+        word: &Range<usize>,
         line: Range<usize>,
         galley: &egui::Galley,
         text_left: f32,
@@ -1302,10 +1309,6 @@ impl EditorState {
         row: f32,
         color: Color32,
     ) {
-        let hover = &self.assist.goto_hover;
-        let Some(word) = hover.word.as_ref().filter(|_| hover.link) else {
-            return;
-        };
         if word.start < line.start || word.end > line.end {
             return;
         }

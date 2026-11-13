@@ -47,16 +47,22 @@ fn trim_url(url: &str) -> &str {
     &url[..end]
 }
 
+/// The addresses of a line, as byte ranges, without the punctuation around them. The editor
+/// opens them with Ctrl+click too.
+pub fn urls(line: &str) -> impl Iterator<Item = Range<usize>> + '_ {
+    URL.find_iter(line)
+        .map(|m| m.start()..m.start() + trim_url(m.as_str()).len())
+}
+
 /// The links of a line of the terminal, as character ranges. `exists` says whether a path
 /// names a file: only those become links.
 pub fn find(line: &str, root: &Path, exists: impl Fn(&Path) -> bool) -> Vec<(Range<usize>, Link)> {
     let chars = |byte: usize| line[..byte].chars().count();
     let mut out: Vec<(Range<usize>, Link)> = Vec::new();
-    for m in URL.find_iter(line) {
-        let url = trim_url(m.as_str());
+    for range in urls(line) {
         out.push((
-            chars(m.start())..chars(m.start() + url.len()),
-            Link::Url(url.to_string()),
+            chars(range.start)..chars(range.end),
+            Link::Url(line[range].to_string()),
         ));
     }
     for caps in PATH.captures_iter(line) {

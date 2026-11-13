@@ -259,3 +259,24 @@ fn a_style_sheet_has_the_swatches_of_its_gradients_shadows_and_curves() {
         );
     }
 }
+
+#[test]
+fn addresses_are_found_under_the_pointer() {
+    let text = "// é: voir https://docs.rs/egui).\nlet a = 1;\nhttp://localhost:5173/x";
+    let s = state(text);
+    let start = text.find("https").unwrap();
+    let url = start..start + "https://docs.rs/egui".len();
+    assert_eq!(s.url_at(text, start), Some(url.clone()), "its first byte");
+    assert_eq!(s.url_at(text, url.end - 1), Some(url.clone()));
+    assert_eq!(
+        s.url_at(text, url.end),
+        None,
+        "not the punctuation after it"
+    );
+    assert_eq!(s.url_at(text, start - 1), None);
+    assert_eq!(s.url_at(text, text.find("let").unwrap()), None);
+    // The last line, without a line break after it.
+    let last = text.find("http://").unwrap();
+    assert_eq!(s.url_at(text, text.len() - 1), Some(last..text.len()));
+    assert_eq!(s.url_at(text, text.len()), None);
+}
