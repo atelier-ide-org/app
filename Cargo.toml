@@ -2,7 +2,7 @@
 # plugins (`api/`), the native plugins (`plugins/<name>/`) and the documentation (`docs/`). The
 # IDE is built without the plugins: they build alone, against `api` only.
 [workspace]
-exclude = ["api", "plugins", "docs", "test/fixtures/demo"]
+exclude = ["api", "plugins", "docs", "test/fixtures/demo", "vendor"]
 
 [package]
 name = "atelier-ide"
@@ -14,7 +14,8 @@ default-run = "atelier-ide"
 
 [dependencies]
 eframe = { version = "0.33", features = ["persistence"] }
-egui_extras = { version = "0.33", features = ["syntect", "svg", "svg_text", "image", "file"] }
+# `http`: the pictures of a Markdown document that are on the web (badges, screenshots).
+egui_extras = { version = "0.33", features = ["syntect", "svg", "svg_text", "image", "file", "http"] }
 # Same version as the one the diagram renderer uses: the picture of a diagram is drawn off the interface.
 resvg = { version = "0.47", default-features = false, features = ["text"] }
 mermaid-rs-renderer = { version = "0.3", default-features = false, features = ["png"] }
@@ -102,3 +103,6 @@ debug = "line-tables-only"
 lto = "thin"
 strip = true
 
+# Crates with a change of ours (see vendor/README.md).
+[patch.crates-io]
+egui_commonmark_backend = { path = "vendor/egui_commonmark_backend" }
