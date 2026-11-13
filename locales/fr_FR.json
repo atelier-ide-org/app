@@ -103,7 +103,10 @@
   "configuration_needs_name": "chaque configuration doit avoir un nom",
   "connect": "Connecter",
   "connect_atelier": "Connecter {agent} à Atelier ?",
+  "connect_every_project": "Pour tous les projets",
+  "connect_every_project_hint": "S'écrit une fois dans votre configuration de l'IA, sans secret : aucun fichier n'est ajouté aux projets.",
   "connected_atelier_mcp": "{agent} connecté au MCP d'Atelier",
+  "connected_atelier_mcp_everywhere": "{agent} connecté au MCP d'Atelier pour tous les projets ({file})",
   "connection_written_codex_config_toml": "La connexion s'écrit dans .codex/config.toml du projet (sans secret). Codex doit faire confiance au projet.",
   "connection_written_configuration_files_project": "La connexion s'écrit dans les fichiers de configuration du projet, sans y mettre de secret.",
   "context_graph": "Graphe de contexte",
@@ -730,6 +733,7 @@
   "words_alt_w": "Mots entiers · Alt+W",
   "working_directory": "Dossier de travail :",
   "wrong_checksum": "somme de contrôle incorrecte pour {name}",
+  "wsl_distribution": "Projet dans la distribution WSL {distro}",
   "your_templates": "Vos modèles",
   "zoom": "zoom"
 }

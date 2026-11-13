@@ -403,6 +403,7 @@ fn the_tree_follows_changes_made_outside() {
     fs::remove_file(base.join("a.txt")).unwrap();
     ide.last_watch = Instant::now() - Duration::from_secs(2);
     ide.watch_files(&ctx);
+    ide.wait_disk();
     step(&mut ide);
     step(&mut ide);
     assert_eq!(names(&ide, &base), ["sub", "new.txt"]);
@@ -1116,4 +1117,27 @@ fn a_window_does_not_put_back_what_another_changed() {
         serde_json::json!(["/b", "/a"]),
         "what this window changed is written"
     );
+}
+
+/// The files of the project are read in the background: a language left to the IDE is on until
+/// they are known, then follows them.
+#[test]
+fn languages_follow_the_files_read_in_the_background() {
+    let dir = temp_project("languages-follow");
+    let mut ide = ide_in(dir.clone());
+    ide.load_project_plugins(true);
+    assert!(ide.auto_plugins.contains("rust"));
+    assert!(ide.builtin_enabled("rust"), "on until the project is read");
+    let follow = |ide: &mut Ide| {
+        ide.project_extensions = None;
+        ide.wait_extensions();
+        ide.auto_checked = Instant::now().checked_sub(Duration::from_secs(5)).unwrap();
+        ide.follow_auto_plugins();
+    };
+    follow(&mut ide);
+    assert!(!ide.builtin_enabled("rust"), "no Rust file in the project");
+    fs::write(dir.join("main.rs"), "fn main() {}").unwrap();
+    follow(&mut ide);
+    assert!(ide.builtin_enabled("rust"), "a Rust file appeared");
+    let _ = fs::remove_dir_all(&dir);
 }

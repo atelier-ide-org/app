@@ -389,7 +389,7 @@ impl McpPlugin {
         let ctx = ctx.clone();
         self.usage.refresh(
             &root,
-            |agent| agents::is_connected(agent, &root, address.as_deref()),
+            |agent| agents::finds_server(agent, &root, address.as_deref()),
             move || ctx.request_repaint(),
         );
     }
@@ -705,6 +705,15 @@ impl BuiltinPlugin for McpPlugin {
             ("mcp.claude", tr!("mcp.mcp_connect_claude_code_project")),
             ("mcp.gemini", tr!("mcp.mcp_connect_gemini_cli_project")),
             ("mcp.codex", tr!("mcp.mcp_connect_codex_project")),
+            (
+                "mcp.claude.user",
+                tr!("mcp.mcp_connect_claude_code_everywhere"),
+            ),
+            (
+                "mcp.gemini.user",
+                tr!("mcp.mcp_connect_gemini_cli_everywhere"),
+            ),
+            ("mcp.codex.user", tr!("mcp.mcp_connect_codex_everywhere")),
             ("mcp.status", tr!("mcp.mcp_show_server_address")),
         ]
         .into_iter()
@@ -716,6 +725,11 @@ impl BuiltinPlugin for McpPlugin {
     }
 
     fn run_command(&mut self, id: &str, host: &mut dyn Host) {
+        // `.user`: for every project, in the configuration of the user.
+        let (id, everywhere) = match id.strip_suffix(".user") {
+            Some(id) => (id, true),
+            None => (id, false),
+        };
         let agent = match id {
             "mcp.claude" => agents::Agent::Claude,
             "mcp.gemini" => agents::Agent::Gemini,
@@ -735,7 +749,16 @@ impl BuiltinPlugin for McpPlugin {
                 return;
             }
         };
-        match agents::connect(agent, host.root(), self.address().as_deref()) {
+        let address = self.address();
+        let written = if everywhere {
+            agents::home(host.root())
+                .ok_or_else(|| tr!("mcp.home_folder_not_found").to_string())
+                .and_then(|home| agents::connect_user(agent, &home, address.as_deref()))
+                .map(|file| vec![file])
+        } else {
+            agents::connect(agent, host.root(), address.as_deref())
+        };
+        match written {
             Ok(files) => {
                 let names: Vec<String> = files
                     .iter()

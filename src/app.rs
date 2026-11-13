@@ -27,6 +27,7 @@ use std::{
 };
 
 mod bookmarks;
+mod disk_watch;
 mod file_index;
 mod fonts_page;
 mod groups;
@@ -487,6 +488,12 @@ pub struct Ide {
     shells: Option<Vec<Shell>>,
     terminal_error: String,
     last_watch: Instant,
+    /// The dates of the open files and listed folders, asked in the background.
+    disk_watch: disk_watch::Watch,
+    /// The reading of the extensions of the project under way, and the project it reads.
+    extensions_job: Option<(PathBuf, std::sync::mpsc::Receiver<BTreeSet<String>>)>,
+    /// The plugins that were on when the languages were last told (a hash of their names).
+    languages_key: Option<u64>,
     show_terminal: bool,
     show_project: bool,
     /// The main menu is spread over the title bar, as when its button is clicked in IntelliJ.
@@ -804,6 +811,9 @@ impl Ide {
             shells: None,
             terminal_error: String::new(),
             last_watch: Instant::now(),
+            disk_watch: disk_watch::Watch::default(),
+            extensions_job: None,
+            languages_key: None,
             show_terminal: false,
             show_project: true,
             main_menu_open: false,
@@ -953,6 +963,10 @@ impl Ide {
             ide.repaint.clone(),
         ));
         egui_extras::install_image_loaders(&cc.egui_ctx);
+        // The badges of a README: SVG pictures of the web whose address does not end in `.svg`.
+        cc.egui_ctx.add_image_loader(Arc::new(
+            crate::plugins::builtins::markdown::remote_svg::RemoteSvg::default(),
+        ));
         ide.sync_in(&cc.egui_ctx);
         // `atelier <folder|file>`: a folder is the project, a file opens in the current one.
         if let Some(path) = target.clone().filter(|p| p.is_dir()) {
@@ -1191,41 +1205,57 @@ impl Ide {
         }
     }
     /// Once a second, reloads the unmodified documents that another program changed.
+    /// Every second, asks which open files and listed folders changed on disk. The dates are
+    /// read in the background (see [`disk_watch`]); the answer is acted on when it comes.
     fn watch_files(&mut self, ctx: &egui::Context) {
         const EVERY: Duration = Duration::from_secs(1);
-        if self.last_watch.elapsed() >= EVERY {
+        if let Some(changes) = self.disk_watch.take() {
+            self.apply_disk_changes(changes);
+        }
+        if self.last_watch.elapsed() >= EVERY && !self.disk_watch.busy() {
             self.last_watch = Instant::now();
-            let mut errors = Vec::new();
-            for doc in &mut self.documents {
-                if !doc.dirty() && doc.changed_on_disk() {
-                    // What was there is kept before another program replaces it.
-                    if let Some(path) = &doc.path {
-                        history::record(&crate::cli::data_dir(), &self.root, path, &doc.text);
-                    }
-                }
-                if !doc.dirty()
-                    && doc.changed_on_disk()
-                    && let Err(e) = doc.reload()
-                {
-                    errors.push(format!("{} : {e:#}", doc.title()));
-                }
-            }
-            if let Some(error) = errors.first() {
-                self.status = trf!("error_reloading", error = error);
-            }
-            self.refresh_tree();
+            let ask = disk_watch::Ask {
+                files: (self.documents.iter())
+                    .filter(|doc| !doc.dirty())
+                    .filter_map(|doc| doc.disk_stamp())
+                    .map(|(path, seen)| (path.to_path_buf(), seen))
+                    .collect(),
+                folders: (self.tree.keys())
+                    .map(|dir| (dir.clone(), self.tree_stamps.get(dir).copied()))
+                    .collect(),
+            };
+            let repaint = self.repaint.clone();
+            self.disk_watch.ask(ask, move || repaint());
         }
         ctx.request_repaint_after(EVERY);
     }
+    /// Reloads the unmodified documents whose file another program rewrote, and reads again
+    /// the folders that gained or lost entries.
+    fn apply_disk_changes(&mut self, changes: disk_watch::Changes) {
+        let mut errors = Vec::new();
+        for doc in &mut self.documents {
+            let reported = (doc.path.as_ref()).is_some_and(|p| changes.files.contains(p));
+            // The answer is a moment old (the file may have been saved since): looked at again.
+            if !reported || doc.dirty() || !doc.changed_on_disk() {
+                continue;
+            }
+            // What was there is kept before another program replaces it.
+            if let Some(path) = &doc.path {
+                history::record(&crate::cli::data_dir(), &self.root, path, &doc.text);
+            }
+            if let Err(e) = doc.reload() {
+                errors.push(format!("{} : {e:#}", doc.title()));
+            }
+        }
+        if let Some(error) = errors.first() {
+            self.status = trf!("error_reloading", error = error);
+        }
+        self.refresh_tree(changes.folders);
+    }
     /// Forgets the listing of the folders that changed on disk, so the tree reads them again:
     /// files created, deleted or renamed by the terminal, Git or any other program show up.
-    fn refresh_tree(&mut self) {
-        let stale: Vec<PathBuf> = self
-            .tree
-            .keys()
-            .filter(|dir| self.tree_stamps.get(*dir) != Some(&project::modified(dir)))
-            .cloned()
-            .collect();
+    fn refresh_tree(&mut self, mut stale: Vec<PathBuf>) {
+        stale.retain(|dir| self.tree.contains_key(dir));
         if stale.is_empty() {
             return;
         }
@@ -1258,6 +1288,13 @@ impl Ide {
         }
         if self.documents.iter().any(|d| d.loading.is_some()) {
             ctx.request_repaint_after(Duration::from_millis(16));
+        }
+    }
+    /// Waits for the answer of the disk to the last question of [`Ide::watch_files`].
+    #[cfg(test)]
+    fn wait_disk(&mut self) {
+        if let Some(changes) = self.disk_watch.wait() {
+            self.apply_disk_changes(changes);
         }
     }
     #[cfg(test)]
@@ -1576,7 +1613,8 @@ impl Ide {
     fn offer_mcp(&mut self, pane: u64, agent: crate::plugins::builtins::mcp::agents::Agent) {
         use crate::plugins::builtins::mcp::agents;
         let key = format!("{}|{}", self.root.display(), agent.id());
-        if agents::is_connected(
+        // Declared by the project, or by the user for every project.
+        if agents::finds_server(
             agent,
             &self.root,
             crate::plugins::builtins::mcp::address().as_deref(),
@@ -1600,6 +1638,28 @@ impl Ide {
             crate::plugins::builtins::mcp::address().as_deref(),
         ) {
             Ok(_) => self.status = trf!("connected_atelier_mcp", agent = agent.name()),
+            Err(e) => self.push_note("MCP", e, true, true),
+        }
+    }
+
+    /// Connects `agent` for every project: the server goes in the configuration of the user,
+    /// and no project gets a file.
+    fn connect_mcp_everywhere(&mut self, agent: crate::plugins::builtins::mcp::agents::Agent) {
+        use crate::plugins::builtins::mcp::agents;
+        let written = agents::home(&self.root)
+            .ok_or_else(|| tr!("mcp.home_folder_not_found").to_string())
+            .and_then(|home| {
+                let address = crate::plugins::builtins::mcp::address();
+                agents::connect_user(agent, &home, address.as_deref())
+            });
+        match written {
+            Ok(file) => {
+                self.status = trf!(
+                    "connected_atelier_mcp_everywhere",
+                    agent = agent.name(),
+                    file = file.display()
+                )
+            }
             Err(e) => self.push_note("MCP", e, true, true),
         }
     }
@@ -5799,6 +5859,13 @@ impl Ide {
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
+                    // A project in a WSL distribution: WSL before its path.
+                    if let Some(wsl) = crate::wsl::parse(&self.root) {
+                        // Not a button: nothing lights up under the pointer.
+                        ui::status_text_fixed(ui, "WSL", "WSL")
+                            .on_hover_text(trf!("wsl_distribution", distro = wsl.distro));
+                        ui.add_space(4.0);
+                    }
                     // Breadcrumbs: project, folders, file.
                     let mut crumbs = vec![(
                         self.root
@@ -6154,6 +6221,12 @@ impl Ide {
                     {
                         choice = Some(0);
                     }
+                    if ui::button(ui, tr!("connect_every_project"))
+                        .on_hover_text(tr!("connect_every_project_hint"))
+                        .clicked()
+                    {
+                        choice = Some(3);
+                    }
                     if ui::button(ui, tr!("don_t_ask_again")).clicked() {
                         choice = Some(2);
                     }
@@ -6172,6 +6245,7 @@ impl Ide {
                     2 => {
                         self.settings.mcp_choices.insert(key, false);
                     }
+                    3 => self.connect_mcp_everywhere(agent),
                     _ => {}
                 }
                 self.release_enter(pane);
@@ -6876,7 +6950,8 @@ impl Ide {
         let disabled: BTreeSet<String> = (states.builtin.clone().into_iter())
             .filter(|(id, state)| match state {
                 PluginState::Set(on) => !on,
-                PluginState::Auto(_) => !self.auto_on(id),
+                // A language whose files are not known yet is on until they are.
+                PluginState::Auto(_) => !self.auto_on(id).unwrap_or(true),
             })
             .map(|(id, _)| id)
             .collect();
@@ -6976,7 +7051,10 @@ impl Ide {
         self.auto_checked = Instant::now();
         let ids: Vec<String> = self.auto_plugins.iter().cloned().collect();
         for id in ids {
-            let on = self.auto_on(&id);
+            // Not known yet (the project is being read): the plugin stays as it is.
+            let Some(on) = self.auto_on(&id) else {
+                continue;
+            };
             if on != self.settings.disabled_builtins.contains(&id) {
                 continue;
             }
@@ -6992,24 +7070,60 @@ impl Ide {
     }
 
     /// Whether a plugin left to the IDE (`"auto"`) is on: Git while the project has a `.git`, a
-    /// language while it has one of its files (read again every 5 seconds at most).
-    fn auto_on(&mut self, id: &str) -> bool {
+    /// language while it has one of its files. None while the files of the project have not
+    /// been read yet.
+    fn auto_on(&mut self, id: &str) -> Option<bool> {
         if id == "git" {
-            return self.root.join(".git").exists();
+            return Some(self.root.join(".git").exists());
         }
         let extensions = match self.builtins.iter().find(|p| p.id() == id) {
             Some(plugin) if !plugin.file_extensions().is_empty() => plugin.file_extensions(),
-            _ => return true,
+            _ => return Some(true),
         };
-        let stale = self
-            .project_extensions
-            .as_ref()
-            .is_none_or(|(at, _)| at.elapsed() > Duration::from_secs(30));
-        if stale {
-            self.project_extensions = Some((Instant::now(), project_extensions(&self.root)));
+        let found = self.known_extensions()?;
+        Some(extensions.iter().any(|e| found.contains(*e)))
+    }
+
+    /// The extensions of the files of the project, read again every 30 seconds at most, in the
+    /// background: the whole project is walked, which a slow disk (a WSL distribution) takes
+    /// its time to answer. None until the first reading is done; the last one meanwhile.
+    fn known_extensions(&mut self) -> Option<&BTreeSet<String>> {
+        use std::sync::mpsc::TryRecvError;
+        if let Some((root, answer)) = &self.extensions_job {
+            match answer.try_recv() {
+                Ok(found) => {
+                    // Another project was opened meanwhile: not its extensions.
+                    if *root == self.root {
+                        self.project_extensions = Some((Instant::now(), found));
+                    }
+                    self.extensions_job = None;
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => self.extensions_job = None,
+            }
         }
-        let found = &self.project_extensions.as_ref().expect("just read").1;
-        extensions.iter().any(|e| found.contains(*e))
+        let stale = (self.project_extensions.as_ref())
+            .is_none_or(|(at, _)| at.elapsed() > Duration::from_secs(30));
+        if stale && self.extensions_job.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let root = self.root.clone();
+            let repaint = self.repaint.clone();
+            self.extensions_job = Some((root.clone(), rx));
+            std::thread::spawn(move || {
+                if tx.send(project_extensions(&root)).is_ok() {
+                    repaint();
+                }
+            });
+        }
+        self.project_extensions.as_ref().map(|(_, found)| found)
+    }
+
+    /// Waits for the extensions of the project being read.
+    #[cfg(test)]
+    fn wait_extensions(&mut self) {
+        while self.known_extensions().is_none() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     fn set_builtin_enabled(&mut self, id: &str, enabled: bool) {
@@ -7064,17 +7178,26 @@ impl Ide {
 
     /// Closes the tool windows of plugins that no longer apply (another project was opened).
     fn close_missing_tools(&mut self) {
-        let tools = self.tool_windows();
+        // Every frame: nothing is listed, and nothing is looked at while no window is open.
         let gone = |tool: Option<&'static ToolWindow>| {
-            tool.is_some_and(|t| !tools.iter().any(|w| w.id == t.id))
+            tool.is_some_and(|t| {
+                !(self.builtins.iter())
+                    .filter(|p| self.builtin_enabled(p.id()) && p.applies())
+                    .any(|p| p.tool_windows().iter().any(|w| w.id == t.id))
+            })
         };
-        if gone(self.left_tool) {
+        let (left, right, bottom) = (
+            gone(self.left_tool),
+            gone(self.right_tool),
+            gone(self.bottom_tool),
+        );
+        if left {
             self.left_tool = None;
         }
-        if gone(self.right_tool) {
+        if right {
             self.right_tool = None;
         }
-        if gone(self.bottom_tool) {
+        if bottom {
             self.bottom_tool = None;
         }
     }
@@ -7197,6 +7320,23 @@ impl Ide {
             .filter(|language| !on.iter().any(|p| p.languages().contains(language)))
             .copied()
             .collect()
+    }
+
+    /// Every frame: the language service is told again only when the plugins that are on are
+    /// no longer the same (one was turned on or off, a native one was loaded).
+    fn follow_plugin_languages(&mut self) {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for plugin in &self.builtins {
+            if self.builtin_enabled(plugin.id()) {
+                plugin.id().hash(&mut hasher);
+            }
+        }
+        let key = hasher.finish();
+        if self.languages_key != Some(key) {
+            self.languages_key = Some(key);
+            self.sync_plugin_languages();
+        }
     }
 
     /// Gives the language service the formatters and the JSON schemas of the plugins that are on.
@@ -7706,7 +7846,7 @@ impl eframe::App for Ide {
             }
         }
         self.each_builtin(|plugin, ide| plugin.update(ctx, ide));
-        self.sync_plugin_languages();
+        self.follow_plugin_languages();
         if ctx.input(|i| i.viewport().close_requested()) && !self.can_quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.request(Pending::Quit);

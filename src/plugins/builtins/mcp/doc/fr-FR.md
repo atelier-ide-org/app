@@ -20,6 +20,8 @@ Les terminaux de l'IDE définissent `ATELIER_MCP_URL` et `ATELIER_MCP_TOKEN`. Qu
 
 Aucun fichier ne contient le secret (`${ATELIER_MCP_TOKEN}` ou `bearer_token_env_var`). Claude et Gemini lisent aussi l'adresse dans `${ATELIER_MCP_URL}`, donc leurs fichiers restent valables quand le port change. Codex ne développe pas les variables : son fichier contient l'adresse du moment et se réécrit quand elle change (le port est conservé d'une session à l'autre, ce qui l'évite le plus souvent), mieux vaut donc ne pas le versionner. La réponse est retenue par projet, et les commandes **MCP : connecter…** de Rechercher partout font la même chose à la demande.
 
+**Pour tous les projets** (dans la même fenêtre, ou les commandes **MCP : connecter… pour tous les projets**) écrit le serveur une seule fois, dans votre configuration de l'agent, et n'ajoute aucun fichier aux projets : `~/.claude.json` pour Claude Code, `~/.gemini/settings.json` pour Gemini CLI, `~/.codex/config.toml` pour Codex. Pour un projet d'une distribution WSL, c'est le dossier personnel de la distribution. Le secret n'y est pas écrit non plus ; hors d'un terminal d'Atelier, les variables n'existent pas et l'agent signale simplement que ce serveur ne répond pas.
+
 Un autre client MCP peut s'y connecter avec l'adresse et le secret (`mcp.json` du dossier de données d'Atelier) : `Authorization: Bearer <secret>`.
 
 ## Outils

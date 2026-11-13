@@ -103,7 +103,10 @@
   "configuration_needs_name": "every configuration needs a name",
   "connect": "Connect",
   "connect_atelier": "Connect {agent} to Atelier?",
+  "connect_every_project": "For Every Project",
+  "connect_every_project_hint": "Written once in your own configuration of the AI, without secrets: no file is added to the projects.",
   "connected_atelier_mcp": "{agent} connected to the Atelier MCP",
+  "connected_atelier_mcp_everywhere": "{agent} connected to the Atelier MCP for every project ({file})",
   "connection_written_codex_config_toml": "The connection is written in .codex/config.toml of the project (without secrets). Codex must trust the project.",
   "connection_written_configuration_files_project": "The connection is written in the configuration files of the project, without secrets.",
   "context_graph": "Context Graph",
@@ -730,6 +733,7 @@
   "words_alt_w": "Words · Alt+W",
   "working_directory": "Working directory:",
   "wrong_checksum": "wrong checksum for {name}",
+  "wsl_distribution": "Project in the WSL distribution {distro}",
   "your_templates": "Your templates",
   "zoom": "zoom"
 }

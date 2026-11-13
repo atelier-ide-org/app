@@ -22,6 +22,8 @@ The terminals of the IDE define `ATELIER_MCP_URL` and `ATELIER_MCP_TOKEN`. When 
 
 No file holds the secret (`${ATELIER_MCP_TOKEN}` or `bearer_token_env_var`). Claude and Gemini also read the address from `${ATELIER_MCP_URL}`, so their files stay valid when the port changes. Codex does not expand variables: its file holds the current address and is rewritten when it changes (the port is kept between sessions, which avoids it most of the time), so better not to commit it. The answer is remembered for each project, and the **MCP: Connect…** commands of Search Everywhere do the same on demand.
 
+**For Every Project** (in the same window, or the **MCP: Connect… for Every Project** commands) writes the server once, in your own configuration of the agent, and adds no file to the projects: `~/.claude.json` for Claude Code, `~/.gemini/settings.json` for Gemini CLI, `~/.codex/config.toml` for Codex. For a project of a WSL distribution, it is the home folder of the distribution. The secret is not written there either; outside a terminal of Atelier the variables do not exist and the agent simply reports that this server does not answer.
+
 Another MCP client can connect with the address and the secret (`mcp.json` in the data folder of Atelier): `Authorization: Bearer <secret>`.
 
 ## Tools
