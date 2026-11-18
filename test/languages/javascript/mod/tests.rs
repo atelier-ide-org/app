@@ -107,6 +107,9 @@ let broken = ;
     };
     provider.update(&doc, text, 1);
     wait_for(&mut provider, "the server", |p| {
+        // The server is started in the background: the IDE takes it when it asks for the
+        // problems of the document, at every frame.
+        p.diagnostics(doc.key);
         p.client().is_some_and(|c| c.ready())
     });
     provider.update(&doc, text, 2);
@@ -213,6 +216,9 @@ helper();
     };
     provider.update(&doc, text, 1);
     wait_for(&mut provider, "the server", |p| {
+        // The server is started in the background: the IDE takes it when it asks for the
+        // problems of the document, at every frame.
+        p.diagnostics(doc.key);
         p.client().is_some_and(|c| c.ready())
     });
     provider.update(&doc, text, 2);

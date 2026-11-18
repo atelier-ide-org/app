@@ -978,7 +978,7 @@ impl K8sPlugin {
                         .font(egui::TextStyle::Monospace)
                         .text_color(color)
                         .desired_width(f32::INFINITY)
-                        .frame(false),
+                        .frame(egui::Frame::NONE),
                 )
                 .on_hover_cursor(egui::CursorIcon::Text);
             });
@@ -1165,10 +1165,10 @@ impl BuiltinPlugin for K8sPlugin {
         self.actions_ui(ui);
         ui.separator();
         if self.detail.is_some() || self.editor.is_some() {
-            egui::SidePanel::right("k8s_detail")
+            egui::Panel::right("k8s_detail")
                 .resizable(true)
-                .default_width(ui.available_width() * 0.5)
-                .show_inside(ui, |ui| {
+                .default_size(ui.available_width() * 0.5)
+                .show(ui, |ui| {
                     if self.editor.is_some() {
                         self.editor_ui(ui);
                     } else {

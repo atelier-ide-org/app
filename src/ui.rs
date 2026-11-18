@@ -173,7 +173,7 @@ pub fn theme_by_index(index: usize) -> Theme {
 }
 
 fn theme_id() -> egui::Id {
-    egui::Id::new("atelier_theme")
+    egui::Id::unique("atelier_theme")
 }
 
 /// The theme the interface is drawn with.
@@ -209,7 +209,7 @@ impl Default for Fonts {
 }
 
 fn fonts_id() -> egui::Id {
-    egui::Id::new("atelier_fonts")
+    egui::Id::unique("atelier_fonts")
 }
 
 /// Uses these fonts from now on (nothing to do when they already are).
@@ -486,7 +486,7 @@ pub fn install(ctx: &egui::Context, t: Theme, editor_font_size: f32) {
         widget.corner_radius = radius;
     }
     ctx.set_visuals(v);
-    ctx.style_mut(|style| {
+    ctx.global_style_mut(|style| {
         use egui::TextStyle;
         style.text_styles = [
             (TextStyle::Small, FontId::proportional(11.5)),
@@ -506,10 +506,21 @@ pub fn install(ctx: &egui::Context, t: Theme, editor_font_size: f32) {
         s.icon_width = 15.0;
         s.icon_spacing = 6.0;
         s.combo_height = 300.0;
+        // Scroll bars as IntelliJ draws them: a translucent thumb over the content, thin until
+        // the pointer is on it, without a track behind it. The thumb takes the color of the
+        // text, so it was nearly white on a dark theme at the opacity egui gives it.
         s.scroll = egui::style::ScrollStyle {
             bar_width: 8.0,
             floating_width: 4.0,
             floating_allocated_width: 0.0,
+            // Off the edge of the panel and of its rounded corners.
+            bar_outer_margin: 2.0,
+            // A long file keeps a thumb that can be seen and grabbed.
+            handle_min_length: 32.0,
+            active_background_opacity: 0.0,
+            interact_background_opacity: 0.0,
+            active_handle_opacity: 0.22,
+            interact_handle_opacity: 0.42,
             ..egui::style::ScrollStyle::floating()
         };
         style.interaction.selectable_labels = false;
@@ -808,8 +819,8 @@ pub fn search_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> R
     let (rect, _) = ui.allocate_exact_size(vec2(width, 28.0), Sense::hover());
     let edit = egui::TextEdit::singleline(text)
         .hint_text(hint)
-        .frame(false)
-        .vertical_align(egui::Align::Center)
+        .frame(egui::Frame::NONE)
+        .align(egui::Align2::LEFT_CENTER)
         .margin(egui::Margin {
             left: 28,
             right: 8,
@@ -871,6 +882,24 @@ pub fn paint_text(ui: &Ui, rect: Rect, x: f32, text: &str, color: Color32, font:
         color,
     );
     x + width
+}
+
+/// Text on one line, cut with `…` when it is wider than `max_width`.
+pub fn elided(
+    ui: &Ui,
+    text: &str,
+    font: FontId,
+    color: Color32,
+    max_width: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.into(), font, color);
+    job.wrap = egui::text::TextWrapping {
+        max_width,
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    ui.painter().layout_job(job)
 }
 
 /// Rounded label, e.g. a branch or tag on a commit.

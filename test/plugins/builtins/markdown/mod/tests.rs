@@ -30,11 +30,12 @@ fn preview_renders_and_tracks_its_height() {
     let path = Path::new("doc.md");
     let mut text = "# Titre\n\n- [ ] tâche\n\n```rust\nfn main() {}\n```\n".to_string();
     for _ in 0..2 {
-        let _ = ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 plugin.preview(ui, path, &mut text, Some(0.5));
             });
-        });
+        })
+        .drop_without_applying_deltas();
     }
     assert!(plugin.views[path].content > 0.0);
 }
@@ -54,11 +55,12 @@ fn mermaid_blocks_are_drawn_as_images() {
         // The diagram is drawn on a thread of its own: frames go by until it is there.
         let mut loaded = None;
         for _ in 0..600 {
-            let _ = ctx.run(Default::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            ctx.run_ui(Default::default(), |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     plugin.preview(ui, Path::new("doc.md"), &mut text, None);
                 });
-            });
+            })
+            .drop_without_applying_deltas();
             if let Some(uri) = plugin.diagrams.first() {
                 let poll = ctx.try_load_texture(uri, Default::default(), Default::default());
                 if matches!(poll, Ok(egui::load::TexturePoll::Ready { .. })) {

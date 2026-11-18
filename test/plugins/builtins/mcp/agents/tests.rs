@@ -122,3 +122,65 @@ fn gemini_gets_its_own_settings_file_and_a_broken_file_is_left_alone() {
     let _ = fs::remove_dir_all(&root);
     let _ = fs::remove_dir_all(&broken);
 }
+
+/// For every project: the server goes in the file of the user, which keeps all it held, and
+/// no project gets a file.
+#[test]
+fn the_server_is_declared_once_for_every_project() {
+    let home = scratch("home");
+    let project = scratch("home-project");
+    fs::write(
+        home.join(".claude.json"),
+        r#"{"numStartups":7,"mcpServers":{"autre":{"command":"x"}},"projects":{"a":{}}}"#,
+    )
+    .unwrap();
+    assert!(!is_connected_user(Agent::Claude, &home, None));
+    let written = connect_user(Agent::Claude, &home, None).unwrap();
+    assert_eq!(written, home.join(".claude.json"));
+    assert!(is_connected_user(Agent::Claude, &home, None));
+    let file: Value = serde_json::from_str(&fs::read_to_string(&written).unwrap()).unwrap();
+    assert_eq!(file["numStartups"], 7);
+    assert_eq!(file["projects"]["a"], json!({}));
+    assert_eq!(file["mcpServers"]["autre"]["command"], "x");
+    assert_eq!(file["mcpServers"][SERVER]["url"], "${ATELIER_MCP_URL}");
+    assert_eq!(
+        file["mcpServers"][SERVER]["headers"]["Authorization"], "Bearer ${ATELIER_MCP_TOKEN}",
+        "no secret in the file"
+    );
+    assert!(!home.join(".claude.json.atelier-tmp").exists());
+
+    connect_user(Agent::Gemini, &home, None).unwrap();
+    assert!(is_connected_user(Agent::Gemini, &home, None));
+    assert!(home.join(".gemini/settings.json").is_file());
+
+    assert!(
+        connect_user(Agent::Codex, &home, None).is_err(),
+        "no address yet"
+    );
+    connect_user(Agent::Codex, &home, Some("http://127.0.0.1:1/mcp")).unwrap();
+    assert!(is_connected_user(
+        Agent::Codex,
+        &home,
+        Some("http://127.0.0.1:1/mcp")
+    ));
+
+    // Nothing in the project, which does not declare the server itself.
+    assert_eq!(fs::read_dir(&project).unwrap().count(), 0);
+    assert!(!is_connected(Agent::Claude, &project, None));
+    for dir in [home, project] {
+        let _ = fs::remove_dir_all(dir);
+    }
+}
+
+/// A file of the user that is not valid JSON is left as it is.
+#[test]
+fn a_broken_file_of_the_user_is_not_replaced() {
+    let home = scratch("home-broken");
+    fs::write(home.join(".claude.json"), "{ not json").unwrap();
+    assert!(connect_user(Agent::Claude, &home, None).is_err());
+    assert_eq!(
+        fs::read_to_string(home.join(".claude.json")).unwrap(),
+        "{ not json"
+    );
+    let _ = fs::remove_dir_all(home);
+}

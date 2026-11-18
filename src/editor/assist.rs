@@ -990,6 +990,66 @@ impl EditorState {
         self.assist.goto_pending = Some((offset, kind));
     }
 
+    /// Ctrl+click on the word at `offset`: the jump is made in this frame when the answer is
+    /// there, instead of being asked at the next frame and waited for.
+    ///
+    /// While Ctrl is held over a word, the editor already asks where it is declared, to draw
+    /// it as a link: that answer is the one of the click. Known, the place is gone to at once;
+    /// on its way, it is the one waited for, and nothing is asked twice.
+    pub(super) fn assist_goto_now(&mut self, ui: &Ui, text: &str, opt: &Options, offset: usize) {
+        let Some(assist) = &opt.assist else { return };
+        self.assist.popup = None;
+        self.assist.chooser = None;
+        self.assist.goto_pending = None;
+        let offset = offset.min(text.len());
+        let word = self.word_at(text, offset);
+        if word.is_empty() {
+            return;
+        }
+        let hover = &mut self.assist.goto_hover;
+        if hover.word.as_ref() != Some(&word) {
+            self.assist.goto_pending = Some((offset, Nav::Definition));
+        } else if hover.link {
+            let places = hover.places.clone();
+            self.assist.job = None;
+            return self.show_places(places, Nav::Definition, false);
+        } else if let Some(answer) = hover.answer.take() {
+            self.assist.job = Some(Job {
+                word,
+                offset,
+                kind: Nav::Definition,
+                usages: false,
+                answer,
+            });
+        } else {
+            // Answered, and it leads nowhere else: a declaration, whose usages are listed.
+            self.assist.job = Some(Job {
+                word,
+                offset,
+                kind: Nav::Definition,
+                usages: true,
+                answer: assist.service.references(&assist.doc, text, offset),
+            });
+        }
+        self.poll_goto(ui, text, opt);
+    }
+
+    /// Goes to the only place of a jump, or lists them to choose from.
+    fn show_places(&mut self, places: Vec<Location>, kind: Nav, usages: bool) {
+        // The usages are always listed, as IntelliJ does; one declaration is simply gone to.
+        if places.len() == 1 {
+            self.assist.navigate = places.into_iter().next();
+        } else if !places.is_empty() {
+            let title = match (kind, usages) {
+                (_, true) | (Nav::Usages, _) => tr!("usages"),
+                (Nav::Type, _) => tr!("types"),
+                (Nav::Implementation, _) => tr!("implementations"),
+                _ => tr!("declarations"),
+            };
+            self.assist.chooser = Some(Chooser::new(title, place_entries(places), false));
+        }
+    }
+
     /// Asks for the places of a jump started, and acts on the answers.
     fn poll_goto(&mut self, ui: &Ui, text: &str, opt: &Options) {
         let Some(assist) = &opt.assist else { return };
@@ -1014,47 +1074,41 @@ impl EditorState {
                 answer,
             });
         }
-        let Some(job) = &self.assist.job else { return };
-        let Some(places) = job.answer.take() else {
-            ui.ctx().request_repaint_after(Duration::from_millis(30));
-            return;
-        };
-        let (word, offset, usages, kind) = (job.word.clone(), job.offset, job.usages, job.kind);
-        self.assist.job = None;
-        // The place the jump started from is not a destination.
-        let places: Vec<Location> = places
-            .into_iter()
-            .filter(|l| {
-                !(l.path.is_none() && {
-                    let range = l.range_in(text);
-                    range.start < word.end && word.start < range.end.max(range.start + 1)
-                })
-            })
-            .collect();
-        if places.is_empty() {
-            if kind == Nav::Definition && !usages {
-                // On a declaration: where it is used.
-                self.assist.job = Some(Job {
-                    word,
-                    offset,
-                    kind,
-                    usages: true,
-                    answer: assist.service.references(&assist.doc, text, offset),
-                });
-            }
-            return;
-        }
-        // The usages are always listed, as IntelliJ does; one declaration is simply gone to.
-        if places.len() == 1 {
-            self.assist.navigate = places.into_iter().next();
-        } else {
-            let title = match (kind, usages) {
-                (_, true) | (Nav::Usages, _) => tr!("usages"),
-                (Nav::Type, _) => tr!("types"),
-                (Nav::Implementation, _) => tr!("implementations"),
-                _ => tr!("declarations"),
+        // An answer that is already there (a language the IDE reads itself) is acted on in
+        // this frame, the usages asked after a declaration included.
+        loop {
+            let Some(job) = &self.assist.job else { return };
+            let Some(places) = job.answer.take() else {
+                // The language server wakes the window when it answers; this is for the others.
+                ui.ctx().request_repaint_after(Duration::from_millis(8));
+                return;
             };
-            self.assist.chooser = Some(Chooser::new(title, place_entries(places), false));
+            let (word, offset, usages, kind) = (job.word.clone(), job.offset, job.usages, job.kind);
+            self.assist.job = None;
+            // The place the jump started from is not a destination.
+            let places: Vec<Location> = places
+                .into_iter()
+                .filter(|l| {
+                    !(l.path.is_none() && {
+                        let range = l.range_in(text);
+                        range.start < word.end && word.start < range.end.max(range.start + 1)
+                    })
+                })
+                .collect();
+            if !places.is_empty() {
+                return self.show_places(places, kind, usages);
+            }
+            if kind != Nav::Definition || usages {
+                return;
+            }
+            // On a declaration: where it is used.
+            self.assist.job = Some(Job {
+                word,
+                offset,
+                kind,
+                usages: true,
+                answer: assist.service.references(&assist.doc, text, offset),
+            });
         }
     }
 
@@ -1289,12 +1343,19 @@ impl EditorState {
         }
     }
 
-    /// Underlines the word that Ctrl+click would follow.
+    /// The word under the pointer that Ctrl+click would follow to its declaration.
+    pub(super) fn goto_link(&self) -> Option<&Range<usize>> {
+        let hover = &self.assist.goto_hover;
+        hover.word.as_ref().filter(|_| hover.link)
+    }
+
+    /// Underlines `word`, which Ctrl+click would follow, where it is on this line.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn link_underline(
         &self,
         painter: &Painter,
         text: &str,
+        word: &Range<usize>,
         line: Range<usize>,
         galley: &egui::Galley,
         text_left: f32,
@@ -1302,10 +1363,6 @@ impl EditorState {
         row: f32,
         color: Color32,
     ) {
-        let hover = &self.assist.goto_hover;
-        let Some(word) = hover.word.as_ref().filter(|_| hover.link) else {
-            return;
-        };
         if word.start < line.start || word.end > line.end {
             return;
         }
@@ -1652,7 +1709,7 @@ impl EditorState {
     /// The mouse over a list: the wheel scrolls it and the row under the pointer is selected.
     pub(super) fn assist_list_mouse(&mut self, ui: &Ui, pointer: Option<Pos2>) {
         let Some(pos) = pointer else { return };
-        let wheel = ui.input(|i| i.smooth_scroll_delta.y + i.raw_scroll_delta.y);
+        let wheel = ui.input(|i| i.smooth_scroll_delta.y);
         if let Some(chooser) = &mut self.assist.chooser
             && let Some(rect) = chooser.rect.filter(|r| r.contains(pos))
         {
@@ -1660,7 +1717,6 @@ impl EditorState {
                 scroll_chooser(chooser, (wheel / ROW_HEIGHT).clamp(-3.0, 3.0));
                 ui.ctx().input_mut(|i| {
                     i.smooth_scroll_delta = egui::Vec2::ZERO;
-                    i.raw_scroll_delta = egui::Vec2::ZERO;
                 });
             }
             if ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
@@ -1684,7 +1740,6 @@ impl EditorState {
             };
             ui.ctx().input_mut(|i| {
                 i.smooth_scroll_delta = egui::Vec2::ZERO;
-                i.raw_scroll_delta = egui::Vec2::ZERO;
             });
         }
     }
@@ -1696,7 +1751,7 @@ impl EditorState {
         };
         let busy = rename.answer.is_some();
         let mut cancel = false;
-        egui::Area::new(egui::Id::new("rename_popup"))
+        egui::Area::new(egui::Id::unique("rename_popup"))
             .order(Order::Foreground)
             .fixed_pos(pos2(at.x, at.y + 4.0))
             .show(ui.ctx(), |ui| {
@@ -1712,7 +1767,7 @@ impl EditorState {
                                 .font(crate::ui::semibold(12.5))
                                 .color(t.text_secondary),
                         );
-                        let id = egui::Id::new("rename_field");
+                        let id = egui::Id::unique("rename_field");
                         let mut output = egui::TextEdit::singleline(&mut rename.name)
                             .id(id)
                             .font(egui::TextStyle::Monospace)
@@ -1773,7 +1828,7 @@ impl EditorState {
         let t = opt.theme;
         let painter = ui.ctx().layer_painter(egui::LayerId::new(
             Order::Foreground,
-            egui::Id::new("editor_assist"),
+            egui::Id::unique("editor_assist"),
         ));
         let screen = ui.ctx().content_rect();
         let line = self.line_of(self.cursor);

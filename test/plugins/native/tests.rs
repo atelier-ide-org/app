@@ -131,12 +131,15 @@ fn a_plugin_draws_in_its_surface_with_its_own_egui() {
             time: Some(f64::from(frame) / 10.0),
             ..Default::default()
         };
-        let output = ctx.run(input, |ctx| {
+        let mut output = ctx.run_ui(input, |ui| {
+            let ctx = &ui.ctx().clone();
             plugin.update(ctx, &mut host);
-            egui::CentralPanel::default().show(ctx, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 plugin.preview(ui, &model, &mut String::new(), None);
             });
         });
+        // Its textures are not uploaded anywhere: dropped on purpose.
+        output.textures_delta.clear();
         painted = output
             .shapes
             .iter()
@@ -191,12 +194,15 @@ fn a_plugin_draws_its_tool_window() {
             time: Some(f64::from(frame) / 10.0),
             ..Default::default()
         };
-        let output = ctx.run(input, |ctx| {
+        let mut output = ctx.run_ui(input, |ui| {
+            let ctx = &ui.ctx().clone();
             plugin.update(ctx, &mut host);
-            egui::CentralPanel::default().show(ctx, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 plugin.tool_window(tool.id, ui, &mut host);
             });
         });
+        // Its textures are not uploaded anywhere: dropped on purpose.
+        output.textures_delta.clear();
         painted = output
             .shapes
             .iter()

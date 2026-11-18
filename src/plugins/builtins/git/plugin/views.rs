@@ -361,6 +361,92 @@ fn paint_sync(ui: &Ui, painter: &egui::Painter, x: f32, y: f32, ahead: u32, behi
     x
 }
 
+/// The current branch in the title bar and in the status bar: one hover area where the icon,
+/// the name (cut with `…` when long), the commits to push and pull, the state of the repository
+/// and the chevron are all centered on the same line.
+struct BranchChip {
+    height: f32,
+    /// Space before the icon and after the last part.
+    pad: f32,
+    icon: f32,
+    font: FontId,
+    color: egui::Color32,
+    chevron: bool,
+}
+
+/// The widest a branch name is shown before it is cut.
+const MAX_BRANCH_WIDTH: f32 = 240.0;
+
+impl BranchChip {
+    fn show(
+        &self,
+        ui: &mut Ui,
+        name: &str,
+        (ahead, behind): (u32, u32),
+        state: Option<&str>,
+        open: bool,
+    ) -> Response {
+        let t = kit::theme(ui.ctx());
+        let gap = 6.0;
+        let name = kit::elided(ui, name, self.font.clone(), self.color, MAX_BRANCH_WIDTH);
+        let sync = if ahead > 0 || behind > 0 {
+            sync_width(ui, ahead, behind) - 4.0
+        } else {
+            0.0
+        };
+        let state = state.map(|s| {
+            ui.painter()
+                .layout_no_wrap(s.to_string(), self.font.clone(), t.warning)
+        });
+        let mut width = self.pad + self.icon + gap + name.size().x;
+        if sync > 0.0 {
+            width += gap + sync;
+        }
+        if let Some(state) = &state {
+            width += gap + state.size().x;
+        }
+        width += if self.chevron {
+            2.0 + 16.0 + 4.0
+        } else {
+            self.pad
+        };
+        let (rect, response) = ui.allocate_exact_size(vec2(width, self.height), Sense::click());
+        kit::paint_hover(ui, rect, &response, open);
+        let y = rect.center().y;
+        let mut x = rect.left() + self.pad;
+        kit::paint_icon(
+            ui,
+            "branch",
+            Rect::from_center_size(pos2(x + self.icon / 2.0, y), Vec2::splat(self.icon)),
+        );
+        x += self.icon + gap;
+        let w = name.size().x;
+        ui.painter()
+            .galley(pos2(x, y - name.size().y / 2.0), name, self.color);
+        x += w;
+        if sync > 0.0 {
+            x += gap;
+            paint_sync(ui, ui.painter(), x, y, ahead, behind);
+            x += sync;
+        }
+        if let Some(state) = state {
+            x += gap;
+            let w = state.size().x;
+            ui.painter()
+                .galley(pos2(x, y - state.size().y / 2.0), state, t.warning);
+            x += w;
+        }
+        if self.chevron {
+            kit::paint_icon(
+                ui,
+                "chevronDown",
+                Rect::from_center_size(pos2(x + 2.0 + 8.0, y), Vec2::splat(16.0)),
+            );
+        }
+        response
+    }
+}
+
 fn sync_width(ui: &Ui, ahead: u32, behind: u32) -> f32 {
     [ahead, behind]
         .iter()
@@ -475,42 +561,42 @@ impl GitPlugin {
             }
             return;
         }
+        let t = self.theme;
+        let chip = BranchChip {
+            height: 28.0,
+            pad: 8.0,
+            icon: 16.0,
+            font: FontId::proportional(13.0),
+            color: t.text,
+            chevron: true,
+        };
         let label = self.head_label();
-        let r = kit::icon_text_button(ui, Some("branch"), &label, true)
-            .on_hover_text(tr!("git.git_branches"));
         let (ahead, behind) = (self.snap.head.ahead, self.snap.head.behind);
-        let mut clicked = r.clicked();
-        let mut anchor = r.rect;
-        if ahead > 0 || behind > 0 {
-            let (rect, sync) = ui.allocate_exact_size(
-                vec2(sync_width(ui, ahead, behind) + 4.0, 28.0),
-                Sense::click(),
-            );
-            paint_sync(
-                ui,
-                ui.painter(),
-                rect.left(),
-                rect.center().y,
-                ahead,
-                behind,
-            );
-            clicked |= sync
-                .on_hover_text(trf!(
+        let r = chip.show(
+            ui,
+            &label,
+            (ahead, behind),
+            self.state_label(),
+            self.branch_popup.is_some(),
+        );
+        let tip = if ahead > 0 || behind > 0 {
+            format!(
+                "{}\n{}",
+                tr!("git.git_branches"),
+                trf!(
                     "git.push_pull",
                     ahead = plural(ahead as usize, "commit", "commits"),
                     behind = plural(behind as usize, "commit", "commits")
-                ))
-                .clicked();
-            anchor = anchor.union(rect);
-        }
-        if let Some(state) = self.state_label() {
-            let t = self.theme;
-            ui.label(RichText::new(state).color(t.warning));
-        }
-        if clicked {
+                )
+            )
+        } else {
+            tr!("git.git_branches").to_string()
+        };
+        let r = r.on_hover_text(tip);
+        if r.clicked() {
             self.toggle_branch_popup(
                 ui.ctx(),
-                anchor.left_bottom() + vec2(0.0, 4.0),
+                r.rect.left_bottom() + vec2(0.0, 4.0),
                 Align2::LEFT_TOP,
             );
         }
@@ -520,45 +606,51 @@ impl GitPlugin {
     pub(super) fn status_widget(&mut self, ui: &mut Ui, _host: &mut dyn Host) {
         let t = self.theme;
         if self.repo.is_some() {
+            // The same as the other items of the status bar: 24 px high, 12.5 px text.
+            let chip = BranchChip {
+                height: 24.0,
+                pad: 7.0,
+                icon: 14.0,
+                font: FontId::proportional(12.5),
+                color: t.text_secondary,
+                chevron: false,
+            };
             let label = self.head_label();
-            let font = FontId::proportional(12.5);
-            let width = text_width(ui, &label, font.clone()) + 34.0;
-            let (rect, response) = ui.allocate_exact_size(vec2(width, 22.0), Sense::click());
-            kit::paint_hover(ui, rect, &response, self.branch_popup.is_some());
-            kit::paint_icon(
+            let (ahead, behind) = (self.snap.head.ahead, self.snap.head.behind);
+            let response = chip.show(
                 ui,
-                "branch",
-                Rect::from_min_size(
-                    pos2(rect.left() + 6.0, rect.center().y - 8.0),
-                    Vec2::splat(16.0),
-                ),
-            );
-            ui.painter().text(
-                pos2(rect.left() + 26.0, rect.center().y),
-                Align2::LEFT_CENTER,
                 &label,
-                font,
-                t.text_secondary,
+                (ahead, behind),
+                self.state_label(),
+                self.branch_popup.is_some(),
             );
-            if response
-                .on_hover_text(tr!("git.current_git_branch"))
-                .clicked()
-            {
+            let response = response.on_hover_text(tr!("git.current_git_branch"));
+            if response.clicked() {
                 self.toggle_branch_popup(
                     ui.ctx(),
-                    rect.right_top() - vec2(0.0, 4.0),
+                    response.rect.right_top() - vec2(0.0, 4.0),
                     Align2::RIGHT_BOTTOM,
                 );
             }
         }
         if let Some(job) = &self.job {
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(format!("{}…", job.label))
-                    .size(12.5)
-                    .color(t.text_secondary),
+            ui.add_space(4.0);
+            let (rect, _) = ui.allocate_exact_size(vec2(16.0, 24.0), Sense::hover());
+            egui::Spinner::new()
+                .size(12.0)
+                .color(t.accent)
+                .paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(12.0)));
+            let font = FontId::proportional(12.5);
+            let text = format!("{}…", job.label);
+            let width = text_width(ui, &text, font.clone());
+            let (rect, _) = ui.allocate_exact_size(vec2(width + 6.0, 24.0), Sense::hover());
+            ui.painter().text(
+                pos2(rect.left() + 3.0, rect.center().y),
+                Align2::LEFT_CENTER,
+                text,
+                font,
+                t.text_secondary,
             );
-            ui.add(egui::Spinner::new().size(12.0).color(t.accent));
         }
     }
 
@@ -574,7 +666,7 @@ impl GitPlugin {
         // Some(None) hides the branch actions, Some(Some) shows them for another branch.
         let mut sub: Option<Option<(Branch, Pos2)>> = None;
         const WIDTH: f32 = 360.0;
-        let main = egui::Area::new(Id::new("git_branch_popup"))
+        let main = egui::Area::new(Id::unique("git_branch_popup"))
             .order(egui::Order::Foreground)
             .fixed_pos(anchor)
             .pivot(pivot)
@@ -719,7 +811,7 @@ impl GitPlugin {
         }
         let mut sub_rect = None;
         if !close && let Some((branch, at)) = self.branch_sub.clone() {
-            let shown = egui::Area::new(Id::new("git_branch_actions"))
+            let shown = egui::Area::new(Id::unique("git_branch_actions"))
                 .order(egui::Order::Foreground)
                 .fixed_pos(at)
                 .show(ctx, |ui| {
@@ -1051,7 +1143,7 @@ impl GitPlugin {
                 });
         }
 
-        egui::TopBottomPanel::bottom("git_commit_box")
+        egui::Panel::bottom("git_commit_box")
             .frame(Frame::NONE.inner_margin(Margin {
                 left: 8,
                 right: 8,
@@ -1059,7 +1151,7 @@ impl GitPlugin {
                 bottom: 10,
             }))
             .show_separator_line(true)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if kit::checkbox(ui, &mut self.amend, tr!("git.amend_last_commit")).changed() {
                         self.toggle_amend();
@@ -1083,7 +1175,7 @@ impl GitPlugin {
                 let edit = ui.add(
                     TextEdit::multiline(&mut self.message)
                         .hint_text(tr!("git.commit_message"))
-                        .frame(false)
+                        .frame(egui::Frame::NONE)
                         .desired_rows(5)
                         .desired_width(f32::INFINITY)
                         .margin(Margin::symmetric(2, 6)),
@@ -1116,7 +1208,7 @@ impl GitPlugin {
 
         egui::CentralPanel::default()
             .frame(Frame::NONE)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| self.changes_tree(ui, &mut action));
@@ -1172,7 +1264,7 @@ impl GitPlugin {
             );
             if row_check(
                 ui,
-                Id::new(("git_group", title.0)),
+                Id::unique(("git_group", title.0)),
                 left + 22.0,
                 rect,
                 state,
@@ -1195,7 +1287,7 @@ impl GitPlugin {
                 let on = self.included(change);
                 let check = row_check(
                     ui,
-                    Id::new(("git_change", &change.path)),
+                    Id::unique(("git_change", &change.path)),
                     left + 42.0,
                     rect,
                     Some(on),
@@ -1384,11 +1476,11 @@ impl GitPlugin {
 
     fn console_view(&mut self, ui: &mut Ui) {
         let t = self.theme;
-        egui::SidePanel::left("git_console_tools")
-            .exact_width(34.0)
+        egui::Panel::left("git_console_tools")
+            .exact_size(34.0)
             .resizable(false)
             .frame(Frame::NONE.inner_margin(Margin::symmetric(4, 2)))
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 if kit::icon_button(ui, "delete", tr!("git.clear")).clicked()
                     && let Ok(mut console) = self.console.lock()
                 {
@@ -1397,7 +1489,7 @@ impl GitPlugin {
             });
         egui::CentralPanel::default()
             .frame(Frame::NONE.inner_margin(Margin::symmetric(8, 4)))
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 egui::ScrollArea::both()
                     .auto_shrink([false, false])
                     .stick_to_bottom(true)
@@ -1446,31 +1538,31 @@ impl GitPlugin {
         }
         let mut action = None;
         let full = ui.available_width();
-        egui::SidePanel::left("git_log_branches")
+        egui::Panel::left("git_log_branches")
             .resizable(true)
-            .default_width((full * 0.17).clamp(160.0, 260.0))
-            .width_range(120.0..=420.0)
+            .default_size((full * 0.17).clamp(160.0, 260.0))
+            .size_range(120.0..=420.0)
             .frame(Frame::NONE.inner_margin(Margin {
                 left: 0,
                 right: 4,
                 top: 0,
                 bottom: 0,
             }))
-            .show_inside(ui, |ui| self.branches_view(ui, host, &mut action));
-        egui::SidePanel::right("git_log_details")
+            .show(ui, |ui| self.branches_view(ui, host, &mut action));
+        egui::Panel::right("git_log_details")
             .resizable(true)
-            .default_width((full * 0.28).clamp(240.0, 420.0))
-            .width_range(200.0..=720.0)
+            .default_size((full * 0.28).clamp(240.0, 420.0))
+            .size_range(200.0..=720.0)
             .frame(Frame::NONE.inner_margin(Margin {
                 left: 4,
                 right: 0,
                 top: 0,
                 bottom: 0,
             }))
-            .show_inside(ui, |ui| self.details_view(ui, &mut action));
+            .show(ui, |ui| self.details_view(ui, &mut action));
         egui::CentralPanel::default()
             .frame(Frame::NONE)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 self.log_filters(ui);
                 if let Some(error) = &self.log.error {
                     ui.label(RichText::new(error).color(self.theme.error));
@@ -1838,17 +1930,17 @@ impl GitPlugin {
         };
         let commit = self.log.rows.iter().find(|c| &c.hash == hash);
         let full = ui.available_height();
-        egui::TopBottomPanel::bottom("git_log_meta")
+        egui::Panel::bottom("git_log_meta")
             .resizable(true)
-            .default_height(full * 0.5)
-            .height_range(60.0..=(full - 40.0).max(61.0))
+            .default_size(full * 0.5)
+            .size_range(60.0..=(full - 40.0).max(61.0))
             .frame(Frame::NONE.inner_margin(Margin {
                 left: 10,
                 right: 8,
                 top: 8,
                 bottom: 6,
             }))
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -1893,7 +1985,7 @@ impl GitPlugin {
             });
         egui::CentralPanel::default()
             .frame(Frame::NONE)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -2027,11 +2119,11 @@ impl GitPlugin {
         let Some(view) = &mut self.diff else { return };
         let mut open = true;
         egui::Window::new(&view.path)
-            .id(Id::new("git_diff"))
+            .id(Id::unique("git_diff"))
             .open(&mut open)
             .default_size([1100.0, 680.0])
             .collapsible(false)
-            .frame(Frame::window(&ctx.style()).inner_margin(Margin::symmetric(8, 6)))
+            .frame(Frame::window(&ctx.global_style()).inner_margin(Margin::symmetric(8, 6)))
             .show(ctx, |ui| {
                 let mut rebuild = false;
                 toolbar(ui, |ui| {
@@ -2186,11 +2278,11 @@ impl GitPlugin {
         let (mut apply, mut edit, mut cancel) = (false, false, false);
         let total = conflict::conflicts(&resolver.segments);
         egui::Window::new(trf!("git.merge_revisions", path = resolver.path))
-            .id(Id::new("git_resolver"))
+            .id(Id::unique("git_resolver"))
             .open(&mut open)
             .default_size([1000.0, 640.0])
             .collapsible(false)
-            .frame(Frame::window(&ctx.style()).inner_margin(Margin::same(10)))
+            .frame(Frame::window(&ctx.global_style()).inner_margin(Margin::same(10)))
             .show(ctx, |ui| {
                 let remaining = resolver
                     .segments
@@ -2246,10 +2338,10 @@ impl GitPlugin {
                         );
                     });
                 });
-                egui::TopBottomPanel::bottom("git_resolver_actions")
+                egui::Panel::bottom("git_resolver_actions")
                     .frame(Frame::NONE.inner_margin(Margin::symmetric(0, 6)))
                     .show_separator_line(false)
-                    .show_inside(ui, |ui| {
+                    .show(ui, |ui| {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             cancel = kit::button(ui, tr!("git.cancel")).clicked();
                             let label = if remaining == 0 {
@@ -2265,7 +2357,7 @@ impl GitPlugin {
                     });
                 egui::CentralPanel::default()
                     .frame(Frame::NONE)
-                    .show_inside(ui, |ui| {
+                    .show(ui, |ui| {
                         egui::ScrollArea::vertical()
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
@@ -2302,9 +2394,9 @@ impl GitPlugin {
         let mut cancel = false;
         let mut force = false;
         let mut remove_remote = None;
-        let modal = egui::Modal::new(Id::new("git_dialog"))
+        let modal = egui::Modal::new(Id::unique("git_dialog"))
             .frame(
-                Frame::popup(&ctx.style())
+                Frame::popup(&ctx.global_style())
                     .inner_margin(20)
                     .corner_radius(10),
             )
@@ -2622,7 +2714,7 @@ impl GitPlugin {
                                         );
                                         let r = ui.interact(
                                             button,
-                                            Id::new(("git_remote_remove", &remote.name)),
+                                            Id::unique(("git_remote_remove", &remote.name)),
                                             Sense::click(),
                                         );
                                         kit::paint_hover(ui, button, &r, false);

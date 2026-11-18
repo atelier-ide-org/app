@@ -60,11 +60,12 @@ fn csv_files_get_a_split_layout_and_the_table_renders() {
     ui::install(&ctx, ui::theme_by_index(0), 14.0);
     let mut text = "name,qty\napple,3\n\"pear, green\",5\n".to_string();
     for _ in 0..2 {
-        let _ = ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 plugin.preview(ui, path, &mut text, None);
             });
-        });
+        })
+        .drop_without_applying_deltas();
     }
     assert_eq!(plugin.states[path].order.len(), 2);
 }

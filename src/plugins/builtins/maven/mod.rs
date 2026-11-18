@@ -109,8 +109,9 @@ pub struct Project {
 
 /// What a `pom.xml` says, read element by element.
 pub fn read_pom(text: &str) -> Option<Project> {
+    // Not trimmed piece by piece (the space between two references would go): the text of an
+    // element is trimmed once it is whole.
     let mut reader = Reader::from_str(text);
-    reader.config_mut().trim_text(true);
     let mut path: Vec<String> = Vec::new();
     let mut project = Project::default();
     let mut parent_group = String::new();
@@ -118,35 +119,31 @@ pub fn read_pom(text: &str) -> Option<Project> {
     let mut plugin = String::new();
     let mut dependency = Dependency::default();
     let mut seen_project = false;
+    // The text of the element being read: its pieces and its references (`&amp;`, `&#38;`)
+    // arrive as events of their own, and are put together when it ends.
+    let mut text = String::new();
     loop {
         match reader.read_event().ok()? {
             Event::Start(e) => {
-                let name = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
+                let name = e.local_name().as_ref().to_string();
                 seen_project |= path.is_empty() && name == "project";
                 path.push(name);
+                text.clear();
             }
-            Event::End(_) => {
-                let at: Vec<&str> = path.iter().map(String::as_str).collect();
-                match at.as_slice() {
-                    ["project", "build", "plugins", "plugin"] => {
-                        if !plugin.is_empty() && !project.plugins.contains(&plugin) {
-                            project.plugins.push(std::mem::take(&mut plugin));
-                        }
-                    }
-                    ["project", "dependencies", "dependency"] => {
-                        if dependency.scope.is_empty() {
-                            dependency.scope = "compile".into();
-                        }
-                        project.dependencies.push(std::mem::take(&mut dependency));
-                    }
-                    _ => {}
+            Event::Text(t) => text.push_str(&t.xml10_content()),
+            Event::GeneralRef(r) => match r.resolve_char_ref().ok()? {
+                Some(c) => text.push(c),
+                None => {
+                    let name = r.xml10_content();
+                    text.push_str(quick_xml::escape::resolve_predefined_entity(&name)?);
                 }
-                path.pop();
-            }
-            Event::Text(t) => {
-                let value = t.unescape().ok()?.trim().to_string();
+            },
+            Event::End(_) => {
+                let value = std::mem::take(&mut text).trim().to_string();
                 let at: Vec<&str> = path.iter().map(String::as_str).collect();
-                match at.as_slice() {
+                // An element without text sets nothing.
+                let leaf: &[&str] = if value.is_empty() { &[] } else { &at };
+                match leaf {
                     ["project", "groupId"] => project.group = value,
                     ["project", "artifactId"] => project.artifact = value,
                     ["project", "version"] => project.version = value,
@@ -169,6 +166,21 @@ pub fn read_pom(text: &str) -> Option<Project> {
                     ["project", "dependencies", "dependency", "scope"] => dependency.scope = value,
                     _ => {}
                 }
+                match at.as_slice() {
+                    ["project", "build", "plugins", "plugin"] => {
+                        if !plugin.is_empty() && !project.plugins.contains(&plugin) {
+                            project.plugins.push(std::mem::take(&mut plugin));
+                        }
+                    }
+                    ["project", "dependencies", "dependency"] => {
+                        if dependency.scope.is_empty() {
+                            dependency.scope = "compile".into();
+                        }
+                        project.dependencies.push(std::mem::take(&mut dependency));
+                    }
+                    _ => {}
+                }
+                path.pop();
             }
             Event::Eof => break,
             _ => {}

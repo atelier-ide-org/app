@@ -3,7 +3,11 @@
 //! Markdown equivalent before the Markdown viewer reads the text.
 
 use crate::ui;
-use eframe::egui::{self, Align, RichText, Sense};
+use eframe::egui::{
+    self, Align, FontId, RichText, Sense, Stroke, pos2,
+    text::{LayoutJob, TextFormat},
+    vec2,
+};
 use pulldown_cmark::{Event, Options, Parser};
 use std::ops::Range;
 
@@ -248,6 +252,21 @@ enum Line {
         indent: usize,
         items: Vec<Inline>,
     },
+    /// A table: its rows, and the pieces of each of their cells.
+    Table {
+        align: Align,
+        rows: Vec<Vec<Vec<Inline>>>,
+    },
+}
+
+/// The table being read.
+struct Table {
+    align: Align,
+    rows: Vec<Vec<Vec<Inline>>>,
+    /// A cell is open: what is read goes into it.
+    in_cell: bool,
+    /// Tables inside this one: their cells are lines of the cell they are in.
+    nested: usize,
 }
 
 #[derive(Default)]
@@ -265,8 +284,7 @@ struct Builder {
     links: Vec<Option<String>>,
     /// Lists being written: the number of the next item, None for a bulleted list.
     lists: Vec<Option<usize>>,
-    /// The cells written in the current table row.
-    cells: usize,
+    table: Option<Table>,
 }
 
 impl Builder {
@@ -275,13 +293,16 @@ impl Builder {
     }
 
     fn flush(&mut self) {
-        while matches!(self.items.last(), Some(Inline::Break)) {
-            self.items.pop();
+        if let Some(table) = &self.table {
+            // In a cell, a block starts a line of the cell; between the cells, nothing is kept.
+            if !table.in_cell {
+                self.items.clear();
+            } else if !matches!(self.items.last(), None | Some(Inline::Break)) {
+                self.items.push(Inline::Break);
+            }
+            return;
         }
-        if let Some(Inline::Text { text, .. }) = self.items.last_mut() {
-            let trimmed = text.trim_end().len();
-            text.truncate(trimmed);
-        }
+        self.trim_items();
         if self.items.is_empty() {
             return;
         }
@@ -291,6 +312,88 @@ impl Builder {
             indent: self.lists.len(),
             items: std::mem::take(&mut self.items),
         });
+    }
+
+    /// Closes the cell being read, if one is.
+    fn end_cell(&mut self) {
+        if !self.table.as_ref().is_some_and(|t| t.in_cell) {
+            return;
+        }
+        self.trim_items();
+        let items = std::mem::take(&mut self.items);
+        if let Some(table) = &mut self.table {
+            table.in_cell = false;
+            match table.rows.last_mut() {
+                Some(row) => row.push(items),
+                None => table.rows.push(vec![items]),
+            }
+        }
+    }
+
+    /// The tags of a table. Those of a table inside a cell are not followed: its cells are
+    /// lines of the cell they are in.
+    fn table_tag(&mut self, name: &str, closing: bool) {
+        let nested = self.table.as_ref().map(|t| t.nested);
+        match (name, closing, nested) {
+            ("table", false, None) => {
+                self.table = Some(Table {
+                    align: self.align(),
+                    rows: Vec::new(),
+                    in_cell: false,
+                    nested: 0,
+                });
+            }
+            ("table", false, Some(_)) => {
+                if let Some(table) = &mut self.table {
+                    table.nested += 1;
+                }
+            }
+            ("table", true, Some(0)) => {
+                self.end_cell();
+                if let Some(table) = self.table.take() {
+                    let rows: Vec<_> = (table.rows.into_iter())
+                        .filter(|row| !row.is_empty())
+                        .collect();
+                    if !rows.is_empty() {
+                        self.lines.push(Line::Table {
+                            align: table.align,
+                            rows,
+                        });
+                    }
+                }
+            }
+            ("table", true, Some(_)) => {
+                if let Some(table) = &mut self.table {
+                    table.nested -= 1;
+                }
+            }
+            ("tr", false, Some(0)) => {
+                self.end_cell();
+                if let Some(table) = &mut self.table {
+                    table.rows.push(Vec::new());
+                }
+            }
+            ("td" | "th", false, Some(0)) => {
+                self.end_cell();
+                self.items.clear();
+                if let Some(table) = &mut self.table {
+                    table.in_cell = true;
+                }
+            }
+            ("tr" | "td" | "th", true, Some(0)) => self.end_cell(),
+            _ => {}
+        }
+    }
+
+    /// Takes the breaks and the spaces off the end of what was read.
+    fn trim_items(&mut self) {
+        while matches!(self.items.last(), Some(Inline::Break)) {
+            self.items.pop();
+        }
+        if let Some(Inline::Text { text, .. }) = self.items.last_mut() {
+            let trimmed = text.trim_end().len();
+            text.truncate(trimmed);
+        }
     }
 
     fn at_line_start(&self) -> bool {
@@ -399,7 +502,10 @@ impl Builder {
                 | "table"
                 | "thead"
                 | "tbody"
+                | "tfoot"
                 | "tr"
+                | "td"
+                | "th"
                 | "dl"
                 | "dt"
                 | "dd"
@@ -470,12 +576,8 @@ impl Builder {
                 };
                 self.text(&marker);
             }
-            ("tr", false) => self.cells = 0,
-            ("td" | "th", false) => {
-                if self.cells > 0 {
-                    self.text(" \u{a0}\u{a0}");
-                }
-                self.cells += 1;
+            ("table" | "tr" | "td" | "th", closing) => {
+                self.table_tag(name, closing);
             }
             _ => {}
         }
@@ -520,11 +622,20 @@ fn layout(html: &str) -> Vec<Line> {
                 rest = &rest[end + 1..];
             }
             None => {
-                let end = rest[1..].find('<').map_or(rest.len(), |i| i + 1);
+                // Past the first character, a `<` that opens no tag or a letter of any length.
+                let first = rest.chars().next().map_or(1, char::len_utf8);
+                let end = rest[first..].find('<').map_or(rest.len(), |i| i + first);
                 builder.text(&rest[..end]);
                 rest = &rest[end..];
             }
         }
+    }
+    // A table that was never closed is shown all the same.
+    if builder.table.is_some() {
+        if let Some(table) = &mut builder.table {
+            table.nested = 0;
+        }
+        builder.table_tag("table", true);
     }
     builder.flush();
     builder.lines
@@ -542,110 +653,323 @@ fn resolve(src: &str, base: &str) -> String {
 /// Draws an HTML block of a Markdown document. `base` is the folder of the document (the base
 /// of relative images), `max_width` the width of the widest image.
 pub(super) fn show(ui: &mut egui::Ui, html: &str, base: &str, max_width: f32) {
-    let t = ui::theme(ui.ctx());
-    for (index, line) in layout(html).into_iter().enumerate() {
-        let Line::Content {
-            align,
-            heading,
-            indent,
-            items,
-        } = line
-        else {
-            ui.separator();
+    let lines = layout(html);
+    if lines.is_empty() {
+        return;
+    }
+    // The Markdown viewer writes its blocks in one wrapped row: the block takes the whole
+    // width, under what is already written, and its lines go one under the other.
+    if ui.cursor().left() > ui.max_rect().left() + 1.0 {
+        ui.end_row();
+    }
+    let width = ui.max_rect().width();
+    let page = Page {
+        base,
+        max_width: max_width.min(width),
+        theme: ui::theme(ui.ctx()),
+    };
+    // What is remembered of a row goes by what the block says, not by where it is drawn: the
+    // viewer does not give the same place its name from one frame to the next.
+    let block = egui::Id::unique(("markdown_html", html));
+    let top_down = egui::Layout::top_down(Align::Min);
+    ui.allocate_ui_with_layout(vec2(width, 0.0), top_down, |ui| {
+        ui.set_width(width);
+        for (index, line) in lines.iter().enumerate() {
+            match line {
+                Line::Rule => {
+                    ui.separator();
+                }
+                Line::Table { align, rows } => {
+                    let id = block.with(("table", index));
+                    aligned(ui, id, *align, 0.0, |ui| table(ui, id, rows, &page));
+                }
+                Line::Content {
+                    align,
+                    heading,
+                    indent,
+                    items,
+                } => {
+                    let size = match heading {
+                        Some(1) => 28.0,
+                        Some(2) => 22.0,
+                        Some(3) => 18.0,
+                        Some(4) => 16.0,
+                        _ => 14.0,
+                    };
+                    let indent = *indent as f32 * 18.0;
+                    // The rows of one line (`<br>`) are closer than two lines are.
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 3.0;
+                        for (row, pieces) in items.split(|i| *i == Inline::Break).enumerate() {
+                            if pieces.is_empty() {
+                                // Two breaks in a row: an empty row.
+                                ui.add_space(size * 0.6);
+                            } else if pieces.iter().all(|i| matches!(i, Inline::Text { .. })) {
+                                text_row(ui, pieces, *align, size, indent, &page);
+                            } else {
+                                let id = block.with(("row", index, row));
+                                aligned(ui, id, *align, indent, |ui| {
+                                    pieces_row(ui, pieces, size, &page)
+                                });
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    });
+}
+
+/// What every piece of a block is drawn with.
+struct Page<'a> {
+    base: &'a str,
+    max_width: f32,
+    theme: ui::Theme,
+}
+
+/// The font and colors of a piece of text.
+fn text_format(ui: &egui::Ui, piece: &Inline, size: f32, page: &Page) -> TextFormat {
+    let Inline::Text {
+        strong,
+        italic,
+        code,
+        strike,
+        link,
+        ..
+    } = piece
+    else {
+        return TextFormat::default();
+    };
+    let font = if *code {
+        FontId::monospace(size * 0.93)
+    } else if *strong {
+        ui::semibold(size)
+    } else {
+        FontId::proportional(size)
+    };
+    let color = if link.is_some() {
+        page.theme.link
+    } else {
+        page.theme.text
+    };
+    let mut format = TextFormat::simple(font, color);
+    format.italics = *italic;
+    if *strike {
+        format.strikethrough = Stroke::new(1.0, color);
+    }
+    if *code {
+        format.background = ui.visuals().code_bg_color;
+    }
+    format
+}
+
+/// A row of text only, wrapped and aligned as one paragraph: each of its lines is centered (or
+/// pushed to the right) by the layout of the text itself, so it is right at the first frame
+/// and at any width. The links are found under the pointer.
+fn text_row(
+    ui: &mut egui::Ui,
+    pieces: &[Inline],
+    align: Align,
+    size: f32,
+    indent: f32,
+    page: &Page,
+) {
+    let width = (ui.available_width() - indent).max(40.0);
+    let mut job = LayoutJob {
+        halign: align,
+        ..Default::default()
+    };
+    job.wrap.max_width = width;
+    // Where each link is, in characters.
+    let mut links: Vec<(std::ops::Range<usize>, &str)> = Vec::new();
+    let mut count = 0;
+    for piece in pieces {
+        let Inline::Text { text, link, .. } = piece else {
             continue;
         };
-        let size = match heading {
-            Some(1) => 28.0,
-            Some(2) => 22.0,
-            Some(3) => 18.0,
-            Some(4) => 16.0,
-            _ => 14.0,
-        };
-        // A centered line is placed from the width it had at the last frame.
-        let id = ui.id().with(("html_line", index));
-        let width = ui.data(|d| d.get_temp::<f32>(id));
-        let available = ui.available_width();
-        let offset = match (align, width) {
+        job.append(text, 0.0, text_format(ui, piece, size, page));
+        let end = count + text.chars().count();
+        if let Some(href) = link {
+            links.push((count..end, href));
+        }
+        count = end;
+    }
+    let galley = ui.painter().layout_job(job);
+    let sense = if links.is_empty() {
+        Sense::hover()
+    } else {
+        Sense::click()
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(width + indent, galley.size().y), sense);
+    // The text is laid out around the point it is aligned on.
+    let anchor = pos2(
+        match align {
+            Align::Min => rect.left() + indent,
+            Align::Center => rect.left() + indent + width / 2.0,
+            Align::Max => rect.left() + indent + width,
+        },
+        rect.top(),
+    );
+    ui.painter().galley(anchor, galley.clone(), page.theme.text);
+    let Some(pointer) = response.hover_pos().filter(|_| !links.is_empty()) else {
+        return;
+    };
+    // The character under the pointer: the one after the nearest gap, or the one before.
+    let local = pointer - anchor;
+    let cursor = galley.cursor_from_pos(local);
+    let gap = galley.pos_from_cursor(cursor);
+    if local.y < gap.top() || local.y > gap.bottom() || (local.x - gap.left()).abs() > size {
+        return;
+    }
+    let index = if local.x < gap.left() {
+        cursor.index.0.saturating_sub(1)
+    } else {
+        cursor.index.0
+    };
+    if let Some((_, href)) = links.iter().find(|(range, _)| range.contains(&index)) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        if response.clicked() {
+            ui.ctx()
+                .open_url(egui::OpenUrl::new_tab(resolve(href, page.base)));
+        }
+    }
+}
+
+/// Draws `add` in a row, centered or pushed to the right from the width it had at the last
+/// frame (a picture has no width before it is loaded). `add` gives the width of what it drew,
+/// side by side: a row too long for the place wraps from the left, and stays there.
+fn aligned(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    align: Align,
+    indent: f32,
+    add: impl FnOnce(&mut egui::Ui) -> f32,
+) {
+    let known = ui.data(|d| d.get_temp::<f32>(id));
+    let available = (ui.available_width() - indent).max(0.0);
+    let offset = indent
+        + match (align, known) {
             (Align::Center, Some(w)) => ((available - w) / 2.0).max(0.0),
             (Align::Max, Some(w)) => (available - w).max(0.0),
             _ => 0.0,
-        } + indent as f32 * 18.0;
-        let response = ui.horizontal_wrapped(|ui| {
+        };
+    let measured = ui
+        .horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             ui.add_space(offset);
-            for item in &items {
-                match item {
-                    Inline::Break => ui.end_row(),
-                    Inline::Text {
-                        text,
-                        strong,
-                        italic,
-                        code,
-                        strike,
-                        link,
-                    } => {
-                        let mut rich = RichText::new(text).size(size);
-                        if *strong {
-                            rich = rich.font(ui::semibold(size));
-                        }
-                        if *italic {
-                            rich = rich.italics();
-                        }
-                        if *code {
-                            rich = rich.code();
-                        }
-                        if *strike {
-                            rich = rich.strikethrough();
-                        }
-                        match link {
-                            Some(href) => {
-                                ui.hyperlink_to(rich.color(t.link), resolve(href, base));
-                            }
-                            None => {
-                                ui.label(rich);
-                            }
-                        }
+            add(ui)
+        })
+        .inner;
+    if align != Align::Min && known.is_none_or(|w| (w - measured).abs() > 0.5) {
+        ui.data_mut(|d| d.insert_temp(id, measured));
+        ui.ctx().request_repaint();
+    }
+}
+
+/// The pieces of a row that has pictures, one after the other. Their width, side by side.
+fn pieces_row(ui: &mut egui::Ui, pieces: &[Inline], size: f32, page: &Page) -> f32 {
+    let mut total = 0.0;
+    for piece in pieces {
+        match piece {
+            Inline::Break => ui.end_row(),
+            Inline::Text { text, link, .. } => {
+                let format = text_format(ui, piece, size, page);
+                let mut rich = RichText::new(text)
+                    .font(format.font_id.clone())
+                    .color(format.color);
+                if format.italics {
+                    rich = rich.italics();
+                }
+                if format.strikethrough != Stroke::NONE {
+                    rich = rich.strikethrough();
+                }
+                if format.background != egui::Color32::TRANSPARENT {
+                    rich = rich.background_color(format.background);
+                }
+                let response = match link {
+                    Some(href) => ui.hyperlink_to(rich, resolve(href, page.base)),
+                    None => ui.label(rich),
+                };
+                total += response.rect.width();
+            }
+            Inline::Image {
+                src,
+                alt,
+                width,
+                height,
+                link,
+            } => {
+                let uri = resolve(src, page.base);
+                let mut image = egui::Image::new(uri).max_width(page.max_width);
+                // `width` and `height` are the size of the picture, not only its limit: a small
+                // one is enlarged. With one of them, the other follows the proportions.
+                if width.is_some() || height.is_some() {
+                    image = image.fit_to_exact_size(vec2(
+                        width.unwrap_or(f32::INFINITY).min(page.max_width),
+                        height.unwrap_or(f32::INFINITY),
+                    ));
+                }
+                let failed = image.load_for_size(ui.ctx(), ui.available_size()).is_err();
+                let response = if failed {
+                    // A picture that cannot be loaded shows its text.
+                    if alt.is_empty() {
+                        continue;
                     }
-                    Inline::Image {
-                        src,
-                        alt,
-                        width,
-                        height,
-                        link,
-                    } => {
-                        let uri = resolve(src, base);
-                        let mut image = egui::Image::new(uri.clone())
-                            .max_width(width.unwrap_or(max_width).min(max_width));
-                        if let Some(h) = height {
-                            image = image.max_height(*h);
-                        }
-                        let failed = image.load_for_size(ui.ctx(), ui.available_size()).is_err();
-                        let response = if failed {
-                            // An image that cannot be loaded (a remote badge) shows its text.
-                            if alt.is_empty() {
-                                continue;
-                            }
-                            ui.label(RichText::new(alt).size(size).color(t.text_secondary))
-                        } else {
-                            ui.add(image.sense(Sense::click()))
-                        };
-                        if let Some(href) = link {
-                            let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-                            if response.clicked() {
-                                ui.ctx()
-                                    .open_url(egui::OpenUrl::new_tab(resolve(href, base)));
-                            }
-                        }
+                    ui.label(
+                        RichText::new(alt)
+                            .size(size)
+                            .color(page.theme.text_secondary),
+                    )
+                } else {
+                    ui.add(image.sense(Sense::click()))
+                };
+                total += response.rect.width();
+                if let Some(href) = link {
+                    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if response.clicked() {
+                        ui.ctx()
+                            .open_url(egui::OpenUrl::new_tab(resolve(href, page.base)));
                     }
                 }
             }
-        });
-        let measured = response.response.rect.width() - offset;
-        if width.is_none_or(|w| (w - measured).abs() > 0.5) && align != Align::Min {
-            ui.data_mut(|d| d.insert_temp(id, measured));
-            ui.ctx().request_repaint();
         }
     }
+    total
+}
+
+/// A table: its cells in columns, each as wide as its widest cell. Its width.
+fn table(ui: &mut egui::Ui, id: egui::Id, rows: &[Vec<Vec<Inline>>], page: &Page) -> f32 {
+    egui::Frame::new()
+        .stroke(Stroke::new(
+            1.0,
+            ui.visuals().widgets.noninteractive.bg_stroke.color,
+        ))
+        .corner_radius(4)
+        .inner_margin(egui::Margin::symmetric(10, 6))
+        .show(ui, |ui| {
+            egui::Grid::new(id)
+                .striped(true)
+                .spacing(vec2(20.0, 8.0))
+                .show(ui, |ui| {
+                    for row in rows {
+                        for cell in row {
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 3.0;
+                                for pieces in cell.split(|i| *i == Inline::Break) {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 0.0;
+                                        pieces_row(ui, pieces, 14.0, page);
+                                    });
+                                }
+                            });
+                        }
+                        ui.end_row();
+                    }
+                });
+        })
+        .response
+        .rect
+        .width()
 }
 
 #[cfg(test)]

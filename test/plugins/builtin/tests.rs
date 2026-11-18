@@ -91,3 +91,20 @@ fn icons_and_schemas_of_plugins_exist() {
         }
     }
 }
+
+/// A file a language plugin says is its own is opened in a language, not as plain text: the
+/// formatter, the colors and the intentions go by that name.
+#[test]
+fn language_extensions_are_known_to_the_project() {
+    for plugin in all().iter().filter(|p| p.language()) {
+        for extension in plugin.file_extensions() {
+            let name = format!("a.{extension}");
+            assert_ne!(
+                crate::project::language(Path::new(&name)),
+                "txt",
+                "{name} of the {} plugin",
+                plugin.id()
+            );
+        }
+    }
+}

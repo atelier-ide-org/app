@@ -128,3 +128,12 @@ fn the_plugin_applies_only_to_a_maven_project() {
     plugin.projects = vec![read_pom(POM).unwrap()];
     assert!(plugin.applies());
 }
+
+/// The references of the text (`&amp;`, `&#233;`) are part of the value they are in.
+#[test]
+fn references_in_the_text_are_resolved() {
+    let pom = "<project><artifactId>a&amp;b</artifactId><name>Caf&#233; &lt;1&gt;</name></project>";
+    let project = read_pom(pom).unwrap();
+    assert_eq!(project.artifact, "a&b");
+    assert_eq!(project.name, "Café <1>");
+}

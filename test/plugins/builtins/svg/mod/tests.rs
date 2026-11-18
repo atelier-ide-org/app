@@ -17,11 +17,12 @@ fn preview_renders() {
     let mut plugin = SvgPlugin::default();
     let mut text = r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><circle cx="10" cy="10" r="8"/></svg>"#.to_string();
     for _ in 0..2 {
-        let _ = ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 plugin.preview(ui, Path::new("a.svg"), &mut text, None);
             });
-        });
+        })
+        .drop_without_applying_deltas();
     }
     assert_eq!(plugin.uris.len(), 1);
 }

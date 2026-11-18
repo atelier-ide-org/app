@@ -547,7 +547,7 @@ impl EditorState {
         let t = opt.theme;
         let painter = ui.ctx().layer_painter(egui::LayerId::new(
             Order::Foreground,
-            egui::Id::new("editor_intel"),
+            egui::Id::unique("editor_intel"),
         ));
         let screen = ui.ctx().content_rect();
         let line = self.line_of(self.cursor);

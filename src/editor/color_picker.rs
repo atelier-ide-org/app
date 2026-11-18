@@ -274,7 +274,7 @@ pub fn show(ui: &mut Ui, picker: &mut Picker, t: Theme) -> bool {
         checkerboard(ui.painter(), preview, 4.0);
         let half = Rect::from_min_max(preview.min, pos2(preview.center().x, preview.bottom()));
         let back = ui
-            .interact(half, ui.id().with("original"), Sense::click())
+            .interact(half, ui.scope_id().with("original"), Sense::click())
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(tr!("editor.color_original"));
         if back.clicked() {

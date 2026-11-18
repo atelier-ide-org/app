@@ -179,7 +179,7 @@ impl EditorState {
             let bounds =
                 Rect::from_min_size(pos2(x, rect.top()), vec2(galley.size().x, CRUMB_HEIGHT));
             if let Some(at) = at {
-                let response = ui.interact(bounds, egui::Id::new(("crumb", i)), Sense::click());
+                let response = ui.interact(bounds, egui::Id::unique(("crumb", i)), Sense::click());
                 if response.hovered() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }

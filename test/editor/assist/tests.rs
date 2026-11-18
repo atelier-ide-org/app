@@ -138,9 +138,10 @@ fn frame(state: &mut EditorState, service: &Service, doc: &DocRef, text: &str) {
         bookmarks: &[],
         spellcheck: false,
     };
-    let _ = ctx.run(Default::default(), |ctx| {
-        egui::CentralPanel::default().show(ctx, |ui| state.assist_frame(ui, text, &options));
-    });
+    ctx.run_ui(Default::default(), |ui| {
+        egui::CentralPanel::default().show(ui, |ui| state.assist_frame(ui, text, &options));
+    })
+    .drop_without_applying_deltas();
 }
 
 fn state_for(text: &str) -> EditorState {
@@ -635,4 +636,99 @@ fn diagnostics_are_counted_for_the_status_bar() {
     let mut state = state_for("bad");
     frame(&mut state, &service, &doc, "bad");
     assert_eq!(state.assist.counts(), (1, 0));
+}
+
+/// One frame in which Ctrl+click lands on `offset`.
+fn click_frame(
+    state: &mut EditorState,
+    service: &Service,
+    doc: &DocRef,
+    text: &str,
+    offset: usize,
+) {
+    let ctx = egui::Context::default();
+    let options = Options {
+        language: "js",
+        highlight: true,
+        font: FontId::monospace(14.0),
+        theme: crate::ui::theme_by_index(0),
+        marks: &[],
+        annotations: None,
+        gutter_commands: &[],
+        assist: Some(Assist {
+            service,
+            doc: doc.clone(),
+        }),
+        search: &[],
+        read_only: false,
+        inlay_hints: false,
+        sticky_lines: false,
+        breadcrumbs: false,
+        bookmarks: &[],
+        spellcheck: false,
+    };
+    ctx.run_ui(Default::default(), |ui| {
+        egui::CentralPanel::default()
+            .show(ui, |ui| state.assist_goto_now(ui, text, &options, offset));
+    })
+    .drop_without_applying_deltas();
+}
+
+/// Ctrl+click goes to the declaration in the frame of the click: nothing is left for the next.
+#[test]
+fn a_ctrl_click_jumps_in_its_own_frame() {
+    let text = "function add() {}\nadd();\nadd();\n";
+    let call = text.find("add();").unwrap() + 1;
+    let (service, doc) = setup_places(Vec::new(), vec![place(0, 9, 12)], Vec::new());
+    let mut state = state_for(text);
+    click_frame(&mut state, &service, &doc, text, call);
+    assert_eq!(state.assist.navigate, Some(place(0, 9, 12)));
+
+    // On the declaration: its usages are listed, in that same frame.
+    let (service, doc) = setup_places(
+        Vec::new(),
+        vec![place(0, 9, 12)],
+        vec![place(1, 0, 3), place(2, 0, 3)],
+    );
+    let mut state = state_for(text);
+    click_frame(&mut state, &service, &doc, text, 10);
+    assert!(state.assist.navigate.is_none());
+    assert_eq!(
+        state.assist.chooser.as_ref().map(|c| c.entries.len()),
+        Some(2)
+    );
+}
+
+/// With Ctrl held over a word, where it leads is already asked, to draw it as a link: the
+/// click uses that answer and asks nothing more.
+#[test]
+fn a_ctrl_click_uses_what_holding_ctrl_over_the_word_found() {
+    let text = "function add() {}\nadd();\n";
+    let call = text.find("add();").unwrap();
+    // The language would now say something else: it is not asked.
+    let (service, doc) = setup_places(Vec::new(), vec![place(5, 0, 1)], Vec::new());
+    let mut state = state_for(text);
+    state.assist.goto_hover = GotoHover {
+        word: Some(call..call + 3),
+        answer: None,
+        link: true,
+        places: vec![place(0, 9, 12)],
+    };
+    click_frame(&mut state, &service, &doc, text, call + 1);
+    assert_eq!(state.assist.navigate, Some(place(0, 9, 12)));
+
+    // Still on its way: that answer is the one waited for.
+    let pending = Oneshot::pending();
+    let mut state = state_for(text);
+    state.assist.goto_hover = GotoHover {
+        word: Some(call..call + 3),
+        answer: Some(pending.clone()),
+        link: false,
+        places: Vec::new(),
+    };
+    click_frame(&mut state, &service, &doc, text, call + 1);
+    assert!(state.assist.navigate.is_none(), "not answered yet");
+    pending.fulfill(vec![place(0, 9, 12)]);
+    frame(&mut state, &service, &doc, text);
+    assert_eq!(state.assist.navigate, Some(place(0, 9, 12)));
 }

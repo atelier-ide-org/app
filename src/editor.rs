@@ -127,6 +127,8 @@ pub struct EditorState {
     swatches_of: Option<(u64, String)>,
     /// Where each swatch was drawn the last frame, before its color: (rect, swatch).
     swatch_rects: Vec<(Rect, usize)>,
+    /// The address under the pointer while Ctrl is held: underlined, Ctrl+click opens it.
+    url_hover: Option<Range<usize>>,
     /// A press on a swatch: it opens the color picker, it does not move the caret.
     swatch_press: bool,
     /// The color picker open on a color of the text.
@@ -176,6 +178,7 @@ impl Default for EditorState {
             swatches: Vec::new(),
             swatches_of: None,
             swatch_rects: Vec::new(),
+            url_hover: None,
             swatch_press: false,
             color_edit: None,
         }
@@ -1197,6 +1200,15 @@ impl EditorState {
             }
         }
         result
+    }
+
+    /// The address (`https://…`) at byte `pos`, as a byte range of `text`.
+    fn url_at(&self, text: &str, pos: usize) -> Option<Range<usize>> {
+        let pos = pos.min(text.len());
+        let line = self.line_range(text, self.line_of(pos));
+        crate::terminal_links::urls(&text[line.clone()])
+            .map(|r| line.start + r.start..line.start + r.end)
+            .find(|r| r.start <= pos && pos < r.end)
     }
 
     fn word_at(&self, text: &str, pos: usize) -> Range<usize> {
@@ -2336,7 +2348,8 @@ impl EditorState {
         let galley = self.galley(ui, text, index, opt);
         let mut column = galley
             .cursor_from_pos(vec2(pos.x - origin.x - text_x, row / 2.0))
-            .index;
+            .index
+            .0;
         column = self.source_column(text, index, column);
         // On a collapsed line the placeholder and the closing are not text of this line.
         if let Some(r) = self.folded_at(index) {
@@ -2422,6 +2435,10 @@ impl EditorState {
                 let (rect, response) =
                     ui.allocate_exact_size(vec2(width, height), Sense::click_and_drag());
                 let origin = rect.min;
+                // The scroll area widens its clip by `clip_rect_margin` on each side: the
+                // selection and the caret row would spill over the frame of the editor.
+                let visible = Rect::from_min_size(origin + viewport.min.to_vec2(), viewport.size());
+                ui.set_clip_rect(ui.clip_rect().intersect(visible));
                 if response.clicked()
                     || response.drag_started()
                     || (cfg!(debug_assertions) && std::env::var_os("ATELIER_SHOT_FOCUS").is_some())
@@ -2538,7 +2555,25 @@ impl EditorState {
                 {
                     self.assist.ctrl_press = true;
                     let at = self.hit(ui, text, origin, row, text_x, pos, opt);
-                    self.assist_goto(at);
+                    // An address opens in the browser, the one of a file (`file://…`) here.
+                    if let Some(url) = self.url_at(text, at) {
+                        let url = &text[url];
+                        match crate::languages::lsp::uri_to_path(url).filter(|p| p.is_file()) {
+                            Some(path) => {
+                                self.assist.navigate = Some(crate::languages::Location {
+                                    path: Some(path),
+                                    line: 0,
+                                    column: 0,
+                                    end_line: 0,
+                                    end_column: 0,
+                                    preview: String::new(),
+                                });
+                            }
+                            None => ui.ctx().open_url(egui::OpenUrl::new_tab(url)),
+                        }
+                    } else {
+                        self.assist_goto_now(ui, text, opt, at);
+                    }
                 }
                 if !ui.input(|i| i.pointer.primary_down()) {
                     self.assist.ctrl_press = false;
@@ -2676,20 +2711,31 @@ impl EditorState {
                             .then(|| self.hit(ui, text, origin, row, text_x, p, opt))
                     });
                 self.assist_list_mouse(ui, hover_pos);
-                self.assist_hover(ui, text, opt, hover_offset, ctrl);
+                self.url_hover = hover_offset
+                    .filter(|_| ctrl)
+                    .and_then(|o| self.url_at(text, o));
+                // Over an address, Ctrl+click opens it: no declaration to look for.
+                self.assist_hover(
+                    ui,
+                    text,
+                    opt,
+                    hover_offset,
+                    ctrl && self.url_hover.is_none(),
+                );
                 // I-beam over the text, the regular arrow over the gutter, a hand over a color
-                // swatch, which opens the picker.
+                // swatch, which opens the picker, and over an address with Ctrl held.
                 if (response.hovered() || response.dragged())
                     && let Some(pos) = ui.input(|i| i.pointer.latest_pos())
                     && !gutter_rect.contains(pos)
                 {
-                    let on_swatch = !opt.read_only
+                    let clickable = (!opt.read_only
                         && !response.dragged()
                         && self
                             .swatch_rects
                             .iter()
-                            .any(|(r, _)| r.expand(1.0).contains(pos));
-                    ui.ctx().set_cursor_icon(if on_swatch {
+                            .any(|(r, _)| r.expand(1.0).contains(pos)))
+                        || self.url_hover.is_some();
+                    ui.ctx().set_cursor_icon(if clickable {
                         egui::CursorIcon::PointingHand
                     } else {
                         egui::CursorIcon::Text
@@ -2710,7 +2756,11 @@ impl EditorState {
 
                 let first =
                     ((viewport.min.y / row).floor().max(0.0) as usize).min(self.row_count());
-                let last = (((viewport.max.y / row).ceil() as usize) + 1).min(self.row_count());
+                // The viewport may be unbounded on the first frame of a tab: `as usize` then
+                // gives usize::MAX, and `+ 1` wrapped to 0 in release, an empty frame.
+                let last = ((viewport.max.y / row).ceil() as usize)
+                    .saturating_add(1)
+                    .min(self.row_count());
                 self.hints_frame(
                     ui,
                     text,
@@ -2843,16 +2893,20 @@ impl EditorState {
                         row,
                         char_width,
                     );
-                    self.link_underline(
-                        &painter,
-                        text,
-                        range.clone(),
-                        &galley,
-                        text_left,
-                        y,
-                        row,
-                        t.link,
-                    );
+                    // What Ctrl+click would follow: an address, or a word that leads somewhere.
+                    if let Some(link) = self.url_hover.as_ref().or(self.goto_link()) {
+                        self.link_underline(
+                            &painter,
+                            text,
+                            link,
+                            range.clone(),
+                            &galley,
+                            text_left,
+                            y,
+                            row,
+                            t.link,
+                        );
+                    }
                     if index == caret_line && focused {
                         let blink = self.activity.elapsed().as_secs_f32();
                         if blink < 0.6 || ((blink * 1.2) as u32).is_multiple_of(2) {
@@ -2872,8 +2926,10 @@ impl EditorState {
                             let caret = Rect::from_min_size(pos2(x, y), vec2(2.0, row));
                             ui.ctx().output_mut(|o| {
                                 o.ime = Some(egui::output::IMEOutput {
+                                    purpose: egui::IMEPurpose::Normal,
                                     rect,
                                     cursor_rect: caret,
+                                    should_interrupt_composition: false,
                                 })
                             });
                         }
@@ -3081,7 +3137,7 @@ impl EditorState {
             self.select(pos, pos);
         }
         let range = (area.content_size.y - area.inner_rect.height()).max(1.0);
-        let fraction = (area.state.offset.y / range).clamp(0.0, 1.0);
+        let fraction = (area.state.clamped_offset().y / range).clamp(0.0, 1.0);
         output.scrolled = (fraction - self.scroll_fraction).abs() > 0.0005;
         self.scroll_fraction = fraction;
         (output.line, output.column) = self.position(text);
@@ -3135,7 +3191,7 @@ fn change_tooltip(ui: &egui::Ui, kind: MarkKind, before: &str, font: FontId) {
     egui::Tooltip::always_open(
         ui.ctx().clone(),
         ui.layer_id(),
-        ui.id().with("git_change_tip"),
+        ui.scope_id().with("git_change_tip"),
         pointer,
     )
     .show(|ui| {

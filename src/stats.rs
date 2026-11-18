@@ -78,7 +78,10 @@ pub fn start() {
     let _ = std::thread::Builder::new()
         .name("stats".into())
         .spawn(move || {
-            let mut system = System::new();
+            // A system whose processes cannot be read: the status bar shows nothing.
+            let Ok(mut system) = System::new() else {
+                return;
+            };
             let kind = ProcessRefreshKind::nothing().with_memory().with_cpu();
             let cores = std::thread::available_parallelism().map_or(1, |n| n.get()) as f32;
             loop {

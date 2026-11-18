@@ -418,7 +418,7 @@ impl Ide {
         let mut close = false;
         let mut apply = false;
         let mut run = None;
-        egui::Modal::new(egui::Id::new("run_configurations")).show(ctx, |ui| {
+        egui::Modal::new(egui::Id::unique("run_configurations")).show(ctx, |ui| {
             ui.set_width(720.0);
             ui::dialog_title(ui, tr!("run_configurations"));
             ui.horizontal_top(|ui| {
@@ -428,7 +428,7 @@ impl Ide {
                     ui.horizontal(|ui| {
                         let add = ui::icon_button(ui, "add", tr!("add_configuration"));
                         egui::Popup::menu(&add)
-                            .id(egui::Id::new("run_configurations_add"))
+                            .id(egui::Id::unique("run_configurations_add"))
                             .show(|ui| {
                                 ui.set_min_width(220.0);
                                 if ui.button(tr!("shell_command")).clicked() {

@@ -27,8 +27,10 @@ use std::{
 };
 
 mod bookmarks;
+mod disk_watch;
 mod file_index;
 mod fonts_page;
+mod groups;
 mod history;
 mod inspect;
 mod navigation;
@@ -273,6 +275,18 @@ struct Settings {
     window_maximized: bool,
 }
 
+/// How long a jump to a file that is not open waits for it to be read, before leaving it to
+/// the next frames.
+const JUMP_WAIT: Duration = Duration::from_millis(40);
+
+/// The room between the background of a row of the project list and what is written in it.
+const PROJECT_ROW_PAD: f32 = 12.0;
+
+/// The rows Search Everywhere shows at once; the others are scrolled to.
+const PALETTE_ROWS: usize = 16;
+/// The room above the first row of its list and under the last one.
+const PALETTE_PAD: f32 = 6.0;
+
 /// The projects the Projects page keeps; the project widget shows the first ten.
 const MAX_RECENT: usize = 50;
 
@@ -392,7 +406,23 @@ enum Target {
     Place(PathBuf, usize),
     /// A saved version of the active file, to go back to.
     Version(PathBuf),
+    /// A match of the text in a file: 0-based line, column and length in characters.
+    Text(PathBuf, usize, usize, usize),
 }
+
+/// The search of the text typed in Search Everywhere through the files of the project, in the
+/// background: its results arrive while the popup is open.
+struct PaletteText {
+    query: String,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    rx: std::sync::mpsc::Receiver<crate::search::FileHits>,
+    hits: Vec<Hit>,
+}
+
+/// Text shorter than this is not searched in the files: it would match everything.
+const TEXT_MIN_QUERY: usize = 3;
+/// Matches of the text shown at most.
+const TEXT_MAX_HITS: usize = 40;
 
 /// What a kept search depends on: the popup mode, what is typed and the list searched.
 #[derive(Clone, PartialEq, Eq)]
@@ -460,6 +490,8 @@ pub struct Ide {
     tree_anchor: Option<PathBuf>,
     /// What a drag in the tree carries: the selection, when the grabbed row is part of it.
     tree_drag_set: Vec<PathBuf>,
+    /// The entries copied (false) or cut (true) in the tree, for Paste.
+    tree_clipboard: Option<(Vec<PathBuf>, bool)>,
     terminals: Vec<TerminalTab>,
     active_terminal: usize,
     next_pane: u64,
@@ -468,6 +500,12 @@ pub struct Ide {
     shells: Option<Vec<Shell>>,
     terminal_error: String,
     last_watch: Instant,
+    /// The dates of the open files and listed folders, asked in the background.
+    disk_watch: disk_watch::Watch,
+    /// The reading of the extensions of the project under way, and the project it reads.
+    extensions_job: Option<(PathBuf, std::sync::mpsc::Receiver<BTreeSet<String>>)>,
+    /// The plugins that were on when the languages were last told (a hash of their names).
+    languages_key: Option<u64>,
     show_terminal: bool,
     show_project: bool,
     /// The main menu is spread over the title bar, as when its button is clicked in IntelliJ.
@@ -537,7 +575,19 @@ pub struct Ide {
     /// The file chosen in the switcher (Ctrl+Tab), while Ctrl is held.
     switcher: Option<usize>,
     /// The second editor beside the first one (Split Right).
-    split: Option<split::SplitPane>,
+    /// The groups of the editor other than the main one, their layout in the main window, the
+    /// windows of their own with theirs, and the counters that give their ids.
+    groups: Vec<groups::Group>,
+    editor_layout: crate::terminal_layout::Node<u64>,
+    group_count: u64,
+    windows: Vec<groups::Window>,
+    window_count: u64,
+    /// The tab being dragged, and the window it was grabbed in.
+    tab_drag: Option<(groups::TabDrag, egui::ViewportId)>,
+    /// The groups of each window and their place, where a dragged tab may be dropped.
+    drop_targets: std::collections::HashMap<egui::ViewportId, Vec<(u64, Rect)>>,
+    /// The tab bar of the main group, where a dragged tab is moved rather than dropped.
+    main_bar: Option<Rect>,
     /// A saved version of the active file, set against the text now (Local History).
     comparison: Option<history::Comparison>,
     /// What Inspect Code found in the project files.
@@ -550,6 +600,7 @@ pub struct Ide {
     file_index: file_index::Index,
     /// The last search of the files or symbols, kept while what it depends on is the same.
     palette_cache: Option<(PaletteKey, Vec<Hit>)>,
+    palette_text: Option<PaletteText>,
     new_name: String,
     tree_dialog: Option<TreeDialog>,
     /// File or folder dragged in the tree, and the folder it is over (this frame, last frame).
@@ -560,6 +611,7 @@ pub struct Ide {
     tree_hover: Option<(PathBuf, Instant)>,
     scroll_to_selected: bool,
     doc_drag: Option<usize>,
+
     /// Rectangle of each tree row drawn last, for the tests that drive the mouse.
     #[cfg(test)]
     row_rects: Vec<(PathBuf, Rect)>,
@@ -622,6 +674,15 @@ struct Session {
     /// Open tool windows, by id.
     #[serde(default)]
     tools: Vec<String>,
+}
+
+/// The characters of `query` are in `text` in this order, not necessarily next to each other.
+fn in_order(query: &str, text: &str) -> bool {
+    let mut rest = text.chars();
+    query
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .all(|c| rest.any(|t| t == c))
 }
 
 fn initials(name: &str) -> String {
@@ -754,6 +815,7 @@ impl Ide {
             tree_multi: BTreeSet::new(),
             tree_anchor: None,
             tree_drag_set: Vec::new(),
+            tree_clipboard: None,
             terminals: Vec::new(),
             active_terminal: 0,
             next_pane: 0,
@@ -761,6 +823,9 @@ impl Ide {
             shells: None,
             terminal_error: String::new(),
             last_watch: Instant::now(),
+            disk_watch: disk_watch::Watch::default(),
+            extensions_job: None,
+            languages_key: None,
             show_terminal: false,
             show_project: true,
             main_menu_open: false,
@@ -806,8 +871,16 @@ impl Ide {
             palette_index: 0,
             file_index: file_index::Index::default(),
             palette_cache: None,
+            palette_text: None,
             switcher: None,
-            split: None,
+            groups: Vec::new(),
+            editor_layout: crate::terminal_layout::Node::Leaf(groups::MAIN),
+            group_count: 0,
+            windows: Vec::new(),
+            window_count: 0,
+            tab_drag: None,
+            drop_targets: std::collections::HashMap::new(),
+            main_bar: None,
             comparison: None,
             inspection: None,
             new_name: String::new(),
@@ -818,6 +891,7 @@ impl Ide {
             tree_hover: None,
             scroll_to_selected: false,
             doc_drag: None,
+
             #[cfg(test)]
             row_rects: Vec::new(),
             pending_copy: None,
@@ -850,6 +924,7 @@ impl Ide {
     }
 
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        crate::highlight::preload();
         // The file of the data folder; the first time, what eframe kept before it existed.
         let mut settings: Settings = load_settings(&settings_path())
             .or_else(|| cc.storage.and_then(|s| eframe::get_value(s, "settings")))
@@ -900,6 +975,10 @@ impl Ide {
             ide.repaint.clone(),
         ));
         egui_extras::install_image_loaders(&cc.egui_ctx);
+        // The badges of a README: SVG pictures of the web whose address does not end in `.svg`.
+        cc.egui_ctx.add_image_loader(Arc::new(
+            crate::plugins::builtins::markdown::remote_svg::RemoteSvg::default(),
+        ));
         ide.sync_in(&cc.egui_ctx);
         // `atelier <folder|file>`: a folder is the project, a file opens in the current one.
         if let Some(path) = target.clone().filter(|p| p.is_dir()) {
@@ -1138,41 +1217,57 @@ impl Ide {
         }
     }
     /// Once a second, reloads the unmodified documents that another program changed.
+    /// Every second, asks which open files and listed folders changed on disk. The dates are
+    /// read in the background (see [`disk_watch`]); the answer is acted on when it comes.
     fn watch_files(&mut self, ctx: &egui::Context) {
         const EVERY: Duration = Duration::from_secs(1);
-        if self.last_watch.elapsed() >= EVERY {
+        if let Some(changes) = self.disk_watch.take() {
+            self.apply_disk_changes(changes);
+        }
+        if self.last_watch.elapsed() >= EVERY && !self.disk_watch.busy() {
             self.last_watch = Instant::now();
-            let mut errors = Vec::new();
-            for doc in &mut self.documents {
-                if !doc.dirty() && doc.changed_on_disk() {
-                    // What was there is kept before another program replaces it.
-                    if let Some(path) = &doc.path {
-                        history::record(&crate::cli::data_dir(), &self.root, path, &doc.text);
-                    }
-                }
-                if !doc.dirty()
-                    && doc.changed_on_disk()
-                    && let Err(e) = doc.reload()
-                {
-                    errors.push(format!("{} : {e:#}", doc.title()));
-                }
-            }
-            if let Some(error) = errors.first() {
-                self.status = trf!("error_reloading", error = error);
-            }
-            self.refresh_tree();
+            let ask = disk_watch::Ask {
+                files: (self.documents.iter())
+                    .filter(|doc| !doc.dirty())
+                    .filter_map(|doc| doc.disk_stamp())
+                    .map(|(path, seen)| (path.to_path_buf(), seen))
+                    .collect(),
+                folders: (self.tree.keys())
+                    .map(|dir| (dir.clone(), self.tree_stamps.get(dir).copied()))
+                    .collect(),
+            };
+            let repaint = self.repaint.clone();
+            self.disk_watch.ask(ask, move || repaint());
         }
         ctx.request_repaint_after(EVERY);
     }
+    /// Reloads the unmodified documents whose file another program rewrote, and reads again
+    /// the folders that gained or lost entries.
+    fn apply_disk_changes(&mut self, changes: disk_watch::Changes) {
+        let mut errors = Vec::new();
+        for doc in &mut self.documents {
+            let reported = (doc.path.as_ref()).is_some_and(|p| changes.files.contains(p));
+            // The answer is a moment old (the file may have been saved since): looked at again.
+            if !reported || doc.dirty() || !doc.changed_on_disk() {
+                continue;
+            }
+            // What was there is kept before another program replaces it.
+            if let Some(path) = &doc.path {
+                history::record(&crate::cli::data_dir(), &self.root, path, &doc.text);
+            }
+            if let Err(e) = doc.reload() {
+                errors.push(format!("{} : {e:#}", doc.title()));
+            }
+        }
+        if let Some(error) = errors.first() {
+            self.status = trf!("error_reloading", error = error);
+        }
+        self.refresh_tree(changes.folders);
+    }
     /// Forgets the listing of the folders that changed on disk, so the tree reads them again:
     /// files created, deleted or renamed by the terminal, Git or any other program show up.
-    fn refresh_tree(&mut self) {
-        let stale: Vec<PathBuf> = self
-            .tree
-            .keys()
-            .filter(|dir| self.tree_stamps.get(*dir) != Some(&project::modified(dir)))
-            .cloned()
-            .collect();
+    fn refresh_tree(&mut self, mut stale: Vec<PathBuf>) {
+        stale.retain(|dir| self.tree.contains_key(dir));
         if stale.is_empty() {
             return;
         }
@@ -1190,6 +1285,13 @@ impl Ide {
     }
     /// Collects files read in the background; a file that cannot be read is closed.
     fn poll_loading(&mut self, ctx: &egui::Context) {
+        self.collect_loaded();
+        if self.documents.iter().any(|d| d.loading.is_some()) {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
+    }
+    /// Takes the files that were read since the last call; one that cannot be read is closed.
+    fn collect_loaded(&mut self) {
         let mut failed = Vec::new();
         for (index, doc) in self.documents.iter_mut().enumerate() {
             if let Some(Err(e)) = doc.poll() {
@@ -1203,8 +1305,12 @@ impl Ide {
             }
             self.status = message;
         }
-        if self.documents.iter().any(|d| d.loading.is_some()) {
-            ctx.request_repaint_after(Duration::from_millis(16));
+    }
+    /// Waits for the answer of the disk to the last question of [`Ide::watch_files`].
+    #[cfg(test)]
+    fn wait_disk(&mut self) {
+        if let Some(changes) = self.disk_watch.wait() {
+            self.apply_disk_changes(changes);
         }
     }
     #[cfg(test)]
@@ -1523,7 +1629,8 @@ impl Ide {
     fn offer_mcp(&mut self, pane: u64, agent: crate::plugins::builtins::mcp::agents::Agent) {
         use crate::plugins::builtins::mcp::agents;
         let key = format!("{}|{}", self.root.display(), agent.id());
-        if agents::is_connected(
+        // Declared by the project, or by the user for every project.
+        if agents::finds_server(
             agent,
             &self.root,
             crate::plugins::builtins::mcp::address().as_deref(),
@@ -1547,6 +1654,28 @@ impl Ide {
             crate::plugins::builtins::mcp::address().as_deref(),
         ) {
             Ok(_) => self.status = trf!("connected_atelier_mcp", agent = agent.name()),
+            Err(e) => self.push_note("MCP", e, true, true),
+        }
+    }
+
+    /// Connects `agent` for every project: the server goes in the configuration of the user,
+    /// and no project gets a file.
+    fn connect_mcp_everywhere(&mut self, agent: crate::plugins::builtins::mcp::agents::Agent) {
+        use crate::plugins::builtins::mcp::agents;
+        let written = agents::home(&self.root)
+            .ok_or_else(|| tr!("mcp.home_folder_not_found").to_string())
+            .and_then(|home| {
+                let address = crate::plugins::builtins::mcp::address();
+                agents::connect_user(agent, &home, address.as_deref())
+            });
+        match written {
+            Ok(file) => {
+                self.status = trf!(
+                    "connected_atelier_mcp_everywhere",
+                    agent = agent.name(),
+                    file = file.display()
+                )
+            }
             Err(e) => self.push_note("MCP", e, true, true),
         }
     }
@@ -1705,6 +1834,15 @@ impl Ide {
         }
         self.pending_nav = Some((path, NavTarget::Place(target)));
         self.apply_pending_nav();
+        // A file that was not open is read in the background, and the place was only gone to a
+        // few frames later. A file of code is read within a few milliseconds: the jump waits
+        // that long for it. A big file, or a slow disk, is still waited for across the frames.
+        let deadline = Instant::now() + JUMP_WAIT;
+        while self.pending_nav.is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+            self.collect_loaded();
+            self.apply_pending_nav();
+        }
     }
 
     /// Puts the caret of the active document on a 0-based line and column.
@@ -1828,6 +1966,11 @@ impl Ide {
         self.palette_query.clear();
         self.palette_index = 0;
         self.file_index.invalidate();
+        // The files are listed while the first letters are typed, not after them.
+        if mode == PaletteMode::Everywhere {
+            let repaint = self.repaint.clone();
+            self.file_index.refresh(&self.root, move || repaint());
+        }
     }
 
     fn perform_action(&mut self, index: usize) {
@@ -1859,7 +2002,7 @@ impl Ide {
             16 => self.open_palette_as(PaletteMode::History),
             17 => self.split_to(false),
             18 => self.split_to(true),
-            19 => self.split = None,
+            19 => self.close_splits(),
             _ => self.start_inspection(),
         }
     }
@@ -1869,6 +2012,9 @@ impl Ide {
     fn shortcuts(&mut self, ctx: &egui::Context) {
         use egui::{Key, Modifiers};
         let command = Modifiers::COMMAND;
+        // The shortcuts of the plugins first: theirs hold more keys than the ones below, which
+        // would take them (Ctrl+Shift+F, Find in Files, opened the search of the file as Ctrl+F).
+        self.each_builtin(|plugin, ide| plugin.shortcuts(ctx, ide));
         let pressed = |modifiers, key| ctx.input_mut(|i| i.consume_key(modifiers, key));
         // egui ignores extra Shift when matching logical shortcuts: most specific first.
         if pressed(command | Modifiers::SHIFT, Key::S) {
@@ -2007,23 +2153,23 @@ impl Ide {
             }
         }
         self.shift_down = shift;
-        self.each_builtin(|plugin, ide| plugin.shortcuts(ctx, ide));
     }
 
     // ---- Title bar ----------------------------------------------------------------------
 
-    fn toolbar(&mut self, ctx: &egui::Context) {
+    fn toolbar(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         let t = self.theme(ctx);
-        egui::TopBottomPanel::top("toolbar")
-            .exact_height(TITLE_HEIGHT)
+        egui::Panel::top("toolbar")
+            .exact_size(TITLE_HEIGHT)
             .frame(egui::Frame::new().fill(t.frame))
             .show_separator_line(false)
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 let bar_rect = ui.max_rect();
                 // Empty areas of the bar move the window; widgets added afterwards take priority.
                 let bar = ui.interact(
                     bar_rect,
-                    egui::Id::new("title_bar"),
+                    egui::Id::unique("title_bar"),
                     Sense::click_and_drag(),
                 );
                 let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
@@ -2164,7 +2310,7 @@ impl Ide {
         };
         // The bar takes the whole width it is given: give it the width of its titles, measured
         // on the previous frame, so that the project widget and the run toolbar stay beside it.
-        let width_id = egui::Id::new("main_menu_width");
+        let width_id = egui::Id::unique("main_menu_width");
         let width = ctx
             .data(|d| d.get_temp::<f32>(width_id))
             .unwrap_or(ui.available_width())
@@ -2204,7 +2350,7 @@ impl Ide {
                 label,
                 egui::Atom::grow(),
                 egui::RichText::new(shortcut).weak(),
-                egui::Atom::custom(egui::Id::NULL, vec2(2.0, 0.0)),
+                egui::Atom::custom(egui::IdSalt::new("shortcut_gap"), vec2(2.0, 0.0)),
             ));
             ui.add(button).clicked()
         };
@@ -2239,12 +2385,7 @@ impl Ide {
                 ui.set_min_width(MENU_WIDTH);
                 for path in self.settings.recent.clone() {
                     if path != self.root
-                        && item(
-                            ui,
-                            "folder",
-                            &crate::project::simplify(&path).display().to_string(),
-                            "",
-                        )
+                        && item(ui, "folder", &crate::project::display_path(&path), "")
                     {
                         self.open_project(path);
                         ui.close();
@@ -2511,60 +2652,82 @@ impl Ide {
                 vec2(16.0, 16.0),
             ),
         );
-        let popup = egui::Popup::menu(&response).id(egui::Id::new("project_menu"));
+        let popup = egui::Popup::menu(&response).id(egui::Id::unique("project_menu"));
         popup.show(|ui| {
-            ui.set_min_width(300.0);
-            ui::section(ui, tr!("recent_projects"));
-            for path in self
+            const WIDTH: f32 = 380.0;
+            ui.set_width(WIDTH);
+            ui::menu_begin(ui);
+            ui.add_space(4.0);
+            // The title starts where the badges of the projects do.
+            ui.horizontal(|ui| {
+                ui.add_space(PROJECT_ROW_PAD + 4.0);
+                ui::section(ui, tr!("recent_projects"));
+            });
+            ui.add_space(4.0);
+            // The same folder may be there as `\?\UNC\…` and as `\…`: once.
+            let mut seen = Vec::new();
+            let recent: Vec<PathBuf> = self
                 .settings
                 .recent
                 .iter()
+                .filter(|p| {
+                    let key = project::simplify(p);
+                    let new = !seen.contains(&key);
+                    seen.push(key);
+                    new
+                })
                 .take(10)
                 .cloned()
-                .collect::<Vec<_>>()
-            {
-                let label = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let current = path == self.root;
-                let button = egui::Button::new(RichText::new(&label).strong())
-                    .right_text(
-                        RichText::new(project::simplify(&path).display().to_string())
-                            .weak()
-                            .small(),
-                    )
-                    .selected(current);
-                let response = ui.add(button);
+                .collect();
+            let root = project::simplify(&self.root);
+            for path in recent {
+                let current = project::simplify(&path) == root;
+                let response = self.recent_project_row(ui, &path, current, WIDTH);
                 if response.clicked() && !current {
                     self.open_project(path.clone());
                     ui.close();
                 }
                 response.context_menu(|ui| {
-                    if ui.button(tr!("open_window")).clicked() {
+                    ui::menu_begin(ui);
+                    if ui::menu_item(ui, Some("folder"), tr!("open_window"), None, false).clicked()
+                    {
                         self.request(Pending::Project(path.clone()));
                         ui.close();
                     }
-                    if ui.button(tr!("open_new_window")).clicked() {
+                    if ui::menu_item(ui, Some("openNewTab"), tr!("open_new_window"), None, false)
+                        .clicked()
+                    {
                         self.open_window(path.clone());
                         ui.close();
                     }
-                    if ui.button(tr!("remove_from_list")).clicked() {
+                    if ui::menu_item(ui, Some("close"), tr!("remove_from_list"), None, true)
+                        .clicked()
+                    {
                         self.settings.recent.retain(|p| p != &path);
                         ui.close();
                     }
                 });
             }
-            if ui.button(tr!("projects.all")).clicked() {
+            ui.add_space(2.0);
+            ui.separator();
+            if ui::menu_item(ui, Some("project"), tr!("projects.all"), None, false).clicked() {
                 self.open_projects_page();
                 ui.close();
             }
-            ui.separator();
-            if ui.button(tr!("open_project_dialog")).clicked() {
+            if ui::menu_item(ui, Some("folder"), tr!("open_project_dialog"), None, false).clicked()
+            {
                 self.choose_project(false);
                 ui.close();
             }
-            if ui.button(tr!("open_new_window_dialog")).clicked() {
+            if ui::menu_item(
+                ui,
+                Some("openNewTab"),
+                tr!("open_new_window_dialog"),
+                None,
+                false,
+            )
+            .clicked()
+            {
                 self.choose_project(true);
                 ui.close();
             }
@@ -2576,7 +2739,9 @@ impl Ide {
                 .filter(|(_, c)| c.id == "git.clone")
                 .collect();
             for (plugin, command) in git {
-                if ui.button(tr!("clone_git_repository")).clicked() {
+                if ui::menu_item(ui, Some("branch"), tr!("clone_git_repository"), None, false)
+                    .clicked()
+                {
                     self.run_builtin_command(plugin, command.id);
                     ui.close();
                 }
@@ -2584,12 +2749,64 @@ impl Ide {
         });
     }
 
+    /// A project of the recent list: its badge, its name and where it is, on two lines cut
+    /// with `…` rather than wrapped, as in IntelliJ.
+    fn recent_project_row(
+        &self,
+        ui: &mut egui::Ui,
+        path: &Path,
+        current: bool,
+        width: f32,
+    ) -> egui::Response {
+        let t = self.theme(ui.ctx());
+        let name = project::display_name(path);
+        let place = project::display_path(path);
+        let exists = path.is_dir();
+        let (rect, response) = ui.allocate_exact_size(vec2(width, 40.0), Sense::click());
+        ui::paint_row(ui, rect, current, response.hovered());
+        // The background of the row (the project that is open, the one under the pointer) is
+        // 4 px inside it: the badge and the text keep PROJECT_ROW_PAD from its edges, where
+        // they nearly touched them.
+        let badge = Rect::from_center_size(
+            pos2(rect.left() + 4.0 + PROJECT_ROW_PAD + 12.0, rect.center().y),
+            vec2(24.0, 24.0),
+        );
+        let color = if exists {
+            project_color(&name)
+        } else {
+            t.text_disabled
+        };
+        ui.painter().rect_filled(badge, 5.0, color);
+        ui.painter().text(
+            badge.center(),
+            Align2::CENTER_CENTER,
+            initials(&name),
+            ui::semibold(10.0),
+            Color32::WHITE,
+        );
+        let x = badge.right() + 10.0;
+        let max = rect.right() - 4.0 - PROJECT_ROW_PAD - x;
+        let main = if exists { t.text } else { t.text_disabled };
+        let title = ui::elided(ui, &name, ui::semibold(13.0), main, max);
+        ui.painter().galley(pos2(x, rect.top() + 4.0), title, main);
+        let below = ui::elided(
+            ui,
+            &place,
+            FontId::proportional(11.5),
+            t.text_secondary,
+            max,
+        );
+        ui.painter()
+            .galley(pos2(x, rect.top() + 22.0), below, t.text_secondary);
+        response.on_hover_text(project::simplify(path).display().to_string())
+    }
+
     /// Run configuration widget: IntelliJ's "Current File".
     fn run_widget(&mut self, ui: &mut egui::Ui) {
         let label = self.run_label();
         let response = ui::icon_text_button(ui, None, &label, true);
         egui::Popup::menu(&response)
-            .id(egui::Id::new("run_menu"))
+            .id(egui::Id::unique("run_menu"))
             .show(|ui| {
                 ui.set_min_width(220.0);
                 if ui
@@ -2704,14 +2921,15 @@ impl Ide {
         }
     }
 
-    fn stripe(&mut self, ctx: &egui::Context, side: Dock) {
+    fn stripe(&mut self, ui: &mut egui::Ui, side: Dock) {
+        let ctx = &ui.ctx().clone();
         let t = self.theme(ctx);
         let panel = match side {
-            Dock::Right => egui::SidePanel::right("stripe_right"),
-            _ => egui::SidePanel::left("stripe_left"),
+            Dock::Right => egui::Panel::right("stripe_right"),
+            _ => egui::Panel::left("stripe_left"),
         };
         panel
-            .exact_width(STRIPE_WIDTH)
+            .exact_size(STRIPE_WIDTH)
             .resizable(false)
             .frame(
                 egui::Frame::new()
@@ -2719,7 +2937,7 @@ impl Ide {
                     .inner_margin(Margin::symmetric(5, 6)),
             )
             .show_separator_line(false)
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 let tools = self.all_tools();
                 let top: Vec<_> = tools
@@ -2937,26 +3155,27 @@ impl Ide {
 
     // ---- Project tool window ------------------------------------------------------------
 
-    fn left_panel(&mut self, ctx: &egui::Context) {
+    fn left_panel(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         if let Some(tool) = self.left_tool {
-            let response = egui::SidePanel::left("tool_left")
-                .default_width(340.0)
-                .width_range(220.0..=760.0)
+            let response = egui::Panel::left("tool_left")
+                .default_size(340.0)
+                .size_range(220.0..=760.0)
                 .frame(self.island(ctx))
                 .show_separator_line(false)
-                .show(ctx, |ui| self.tool_panel(ui, tool));
+                .show(ui, |ui| self.tool_panel(ui, tool));
             self.panel_focus(Some(tool.id), response.response.rect);
             return;
         }
         if !self.show_project {
             return;
         }
-        let response = egui::SidePanel::left("project")
-            .default_width(300.0)
-            .width_range(180.0..=600.0)
+        let response = egui::Panel::left("project")
+            .default_size(300.0)
+            .size_range(180.0..=600.0)
             .frame(self.island(ctx))
             .show_separator_line(false)
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 let hide = self.tool_header(ui, tr!("project"), |ide, ui| {
                     if ui::icon_button(ui, "collapseAll", tr!("collapse_all")).clicked() {
                         ide.expanded = BTreeSet::from([ide.root.clone()]);
@@ -2978,7 +3197,7 @@ impl Ide {
                         },
                     );
                     egui::Popup::menu(&graph)
-                        .id(egui::Id::new("graph_menu"))
+                        .id(egui::Id::unique("graph_menu"))
                         .show(|ui| ide.graph_menu(ui));
                 });
                 if hide {
@@ -3133,6 +3352,14 @@ impl Ide {
                 {
                     self.tree_dialog = Some(TreeDialog::Delete(selection));
                     ui.close();
+                } else if ui::menu_item(ui, None, tr!("cut"), Some("Ctrl+X"), false).clicked() {
+                    self.tree_copy(ui.ctx(), true);
+                    ui.close();
+                } else if ui::menu_item(ui, Some("copy"), tr!("copy"), Some("Ctrl+C"), false)
+                    .clicked()
+                {
+                    self.tree_copy(ui.ctx(), false);
+                    ui.close();
                 } else if ui::menu_item(ui, Some("copy"), tr!("copy_paths"), None, false).clicked()
                 {
                     let paths: Vec<_> = selection
@@ -3186,6 +3413,25 @@ impl Ide {
             if ui::menu_item(ui, Some("newFolder"), tr!("new_folder_dialog"), None, false).clicked()
             {
                 self.tree_dialog = Some(TreeDialog::NewFolder(prefix));
+                ui.close();
+            }
+            ui::menu_separator(ui);
+            if !is_root {
+                if ui::menu_item(ui, None, tr!("cut"), Some("Ctrl+X"), false).clicked() {
+                    self.tree_select_only(path);
+                    self.tree_copy(ui.ctx(), true);
+                    ui.close();
+                }
+                if ui::menu_item(ui, Some("copy"), tr!("copy"), Some("Ctrl+C"), false).clicked() {
+                    self.tree_select_only(path);
+                    self.tree_copy(ui.ctx(), false);
+                    ui.close();
+                }
+            }
+            if ui::menu_item(ui, None, tr!("paste"), Some("Ctrl+V"), false).clicked() {
+                self.tree_select_only(path);
+                // The tree's own copy; a path copied elsewhere comes with Ctrl+V.
+                self.tree_paste("");
                 ui.close();
             }
             if !is_root {
@@ -3333,7 +3579,7 @@ impl Ide {
             let t = self.theme(ctx);
             ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Tooltip,
-                egui::Id::new("tree_drag"),
+                egui::Id::unique("tree_drag"),
             ))
             .text(
                 pointer + vec2(12.0, 12.0),
@@ -3588,6 +3834,39 @@ impl Ide {
         {
             return;
         }
+        // Copy, cut and paste: egui-winit turns Ctrl+C, X and V into events of their own.
+        let (copy, cut, paste) = ctx.input_mut(|i| {
+            let mut found = (false, false, None);
+            i.events.retain(|e| match e {
+                egui::Event::Copy => {
+                    found.0 = true;
+                    false
+                }
+                egui::Event::Cut => {
+                    found.1 = true;
+                    false
+                }
+                egui::Event::Paste(text) => {
+                    found.2 = Some(text.clone());
+                    false
+                }
+                _ => true,
+            });
+            found.0 |= i.consume_key(Modifiers::COMMAND, Key::C);
+            found.1 |= i.consume_key(Modifiers::COMMAND, Key::X);
+            if i.consume_key(Modifiers::COMMAND, Key::V) && found.2.is_none() {
+                found.2 = Some(String::new());
+            }
+            found
+        });
+        if copy || cut {
+            self.tree_copy(ctx, cut);
+            return;
+        }
+        if let Some(text) = paste {
+            self.tree_paste(&text);
+            return;
+        }
         let key = |k: Key| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, k));
         let rows = self.visible_rows();
         let current = self
@@ -3667,6 +3946,112 @@ impl Ide {
         }
     }
 
+    /// Copy or Cut in the tree: the selected entries are kept for Paste, and their paths go to
+    /// the clipboard of the system as text.
+    fn tree_copy(&mut self, ctx: &egui::Context, cut: bool) {
+        let selection: Vec<PathBuf> = self
+            .tree_selection()
+            .into_iter()
+            .filter(|p| *p != self.root)
+            .collect();
+        if selection.is_empty() {
+            return;
+        }
+        let text: Vec<String> = selection
+            .iter()
+            .map(|p| project::simplify(p).display().to_string())
+            .collect();
+        ctx.copy_text(text.join("\n"));
+        self.status = if cut {
+            trf!("tree_cut", count = selection.len())
+        } else {
+            trf!("tree_copied", count = selection.len())
+        };
+        self.tree_clipboard = Some((selection, cut));
+    }
+
+    /// Paste in the tree: into the selected folder, or the folder of the selected file. What
+    /// was copied or cut in the tree, else the paths of files the clipboard holds as text (one
+    /// per line, as Copy as Path of the Explorer gives them).
+    fn tree_paste(&mut self, clipboard: &str) {
+        let target = self
+            .tree_selected
+            .clone()
+            .unwrap_or_else(|| self.root.clone());
+        let dir = if target.is_dir() {
+            target
+        } else {
+            target
+                .parent()
+                .map_or_else(|| self.root.clone(), Path::to_path_buf)
+        };
+        let ours: Option<Vec<String>> = self.tree_clipboard.as_ref().map(|(paths, _)| {
+            paths
+                .iter()
+                .map(|p| project::simplify(p).display().to_string())
+                .collect()
+        });
+        // The clipboard changed since the tree copied: what it holds now wins.
+        let theirs: Vec<PathBuf> = clipboard
+            .lines()
+            .map(|l| l.trim().trim_matches('"'))
+            .filter(|l| !l.is_empty())
+            .map(PathBuf::from)
+            .collect();
+        let (sources, cut) = match &self.tree_clipboard {
+            Some((paths, cut))
+                if clipboard.is_empty()
+                    || ours
+                        .as_ref()
+                        .is_some_and(|o| o.join("\n") == clipboard.trim()) =>
+            {
+                (paths.clone(), *cut)
+            }
+            _ if !theirs.is_empty() && theirs.iter().all(|p| p.is_absolute() && p.exists()) => {
+                (theirs, false)
+            }
+            _ => return,
+        };
+        let mut done = Vec::new();
+        for from in &sources {
+            let result = if cut {
+                project::move_into(from, &dir)
+            } else {
+                project::copy_into(from, &dir)
+            };
+            match result {
+                Ok(new) => {
+                    if cut {
+                        self.path_changed(from, &new);
+                    }
+                    done.push(new);
+                }
+                Err(e) => {
+                    self.status = trf!("error_detail", e = format!("{:#}", e));
+                    break;
+                }
+            }
+        }
+        if cut {
+            self.tree_clipboard = None;
+        }
+        self.tree.clear();
+        self.file_index.invalidate();
+        self.expanded.insert(dir);
+        if !done.is_empty() && !crate::i18n::is_error(&self.status) {
+            self.status = trf!("tree_pasted", count = done.len());
+        }
+        match &done[..] {
+            [] => {}
+            [only] => self.tree_select_only(&only.clone()),
+            _ => {
+                self.tree_selected = done.first().cloned();
+                self.tree_multi = done.into_iter().collect();
+            }
+        }
+        self.scroll_to_selected = true;
+    }
+
     fn tree_dialogs(&mut self, ctx: &egui::Context) {
         let Some(dialog) = self.tree_dialog.take() else {
             return;
@@ -3675,7 +4060,7 @@ impl Ide {
         let mut keep = None;
         match dialog {
             TreeDialog::NewFolder(mut name) => {
-                let modal = egui::Modal::new(egui::Id::new("new_folder")).show(ctx, |ui| {
+                let modal = egui::Modal::new(egui::Id::unique("new_folder")).show(ctx, |ui| {
                     ui.set_width(420.0);
                     ui::dialog_title(ui, tr!("new_folder"));
                     ui.add(
@@ -3709,7 +4094,7 @@ impl Ide {
                 }
             }
             TreeDialog::Rename { path, mut name } => {
-                let modal = egui::Modal::new(egui::Id::new("rename")).show(ctx, |ui| {
+                let modal = egui::Modal::new(egui::Id::unique("rename")).show(ctx, |ui| {
                     ui.set_width(420.0);
                     ui::dialog_title(ui, tr!("rename"));
                     ui.add(egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY))
@@ -3733,7 +4118,7 @@ impl Ide {
                 }
             }
             TreeDialog::Delete(paths) => {
-                let modal = egui::Modal::new(egui::Id::new("delete")).show(ctx, |ui| {
+                let modal = egui::Modal::new(egui::Id::unique("delete")).show(ctx, |ui| {
                     ui.set_width(420.0);
                     ui::dialog_title(ui, tr!("delete"));
                     if let [path] = &paths[..] {
@@ -3957,19 +4342,20 @@ impl Ide {
 
     // ---- Bottom and right tool windows --------------------------------------------------
 
-    fn bottom_panel(&mut self, ctx: &egui::Context) {
+    fn bottom_panel(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         let tool = match self.bottom_tool {
             Some(tool) => Some(tool),
             None if self.show_terminal => None,
             None => return,
         };
-        let response = egui::TopBottomPanel::bottom("tool_bottom")
-            .default_height(300.0)
-            .height_range(140.0..=820.0)
+        let response = egui::Panel::bottom("tool_bottom")
+            .default_size(300.0)
+            .size_range(140.0..=820.0)
             .resizable(true)
             .frame(self.island(ctx))
             .show_separator_line(false)
-            .show(ctx, |ui| match tool {
+            .show(ui, |ui| match tool {
                 Some(tool) => self.tool_panel(ui, tool),
                 None => self.terminal_panel(ui),
             });
@@ -4008,7 +4394,7 @@ impl Ide {
             }
             let plus = ui::icon_button(ui, "add", tr!("new_terminal"));
             egui::Popup::menu(&plus)
-                .id(egui::Id::new("terminal_shells"))
+                .id(egui::Id::unique("terminal_shells"))
                 .show(|ui| {
                     ui::menu_begin(ui);
                     ui::menu_title(ui, tr!("new_terminal"));
@@ -4056,7 +4442,7 @@ impl Ide {
             let active = index == self.active_terminal;
             let response = ui.interact(
                 rect,
-                egui::Id::new(("terminal_tab", index)),
+                egui::Id::unique(("terminal_tab", index)),
                 Sense::click_and_drag(),
             );
             if response.dragged() && ui.input(|i| i.pointer.is_decidedly_dragging()) {
@@ -4098,7 +4484,7 @@ impl Ide {
             );
             let cross_response = ui.interact(
                 cross,
-                egui::Id::new(("terminal_close", index)),
+                egui::Id::unique(("terminal_close", index)),
                 Sense::click(),
             );
             if cross_response.hovered() {
@@ -4210,7 +4596,7 @@ impl Ide {
                         body.min.y += HEAD;
                         let response = ui.interact(
                             head,
-                            egui::Id::new(("pane_head", pane.id)),
+                            egui::Id::unique(("pane_head", pane.id)),
                             Sense::click_and_drag(),
                         );
                         ui.painter().rect_filled(
@@ -4253,6 +4639,8 @@ impl Ide {
                     }
                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body));
                     pane.term.ai_watch = ai_watch;
+                    // A right click on a selection copies it instead of opening the menu.
+                    let had_selection = pane.selection.any();
                     let area = crate::terminal_ui::show(
                         &mut child,
                         &mut pane.term,
@@ -4269,34 +4657,53 @@ impl Ide {
                     if area.secondary_clicked() {
                         focused = Some(pane.id);
                     }
-                    area.context_menu(|ui| {
-                        ui::menu_begin(ui);
-                        if ui::menu_item(ui, Some("sideBySide"), tr!("split_right"), None, false)
+                    let copied = had_selection && area.secondary_clicked();
+                    if !copied {
+                        area.context_menu(|ui| {
+                            ui::menu_begin(ui);
+                            if ui::menu_item(ui, None, tr!("paste"), Some("Ctrl+V"), false)
+                                .clicked()
+                            {
+                                // The clipboard comes back as a Paste event to the terminal,
+                                // which has the keyboard.
+                                ui.ctx()
+                                    .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                                ui.close();
+                            }
+                            ui::menu_separator(ui);
+                            if ui::menu_item(
+                                ui,
+                                Some("sideBySide"),
+                                tr!("split_right"),
+                                None,
+                                false,
+                            )
                             .clicked()
-                        {
-                            menu_split = Some(false);
-                            ui.close();
-                        }
-                        if ui::menu_item(ui, Some("unified"), tr!("split_down"), None, false)
-                            .clicked()
-                        {
-                            menu_split = Some(true);
-                            ui.close();
-                        }
-                        ui::menu_separator(ui);
-                        if split_view
-                            && ui::menu_item(ui, None, tr!("close_pane"), None, false).clicked()
-                        {
-                            menu_close_pane = true;
-                            ui.close();
-                        }
-                        if ui::menu_item(ui, Some("closeSmall"), tr!("close_tab"), None, false)
-                            .clicked()
-                        {
-                            menu_close_tab = true;
-                            ui.close();
-                        }
-                    });
+                            {
+                                menu_split = Some(false);
+                                ui.close();
+                            }
+                            if ui::menu_item(ui, Some("unified"), tr!("split_down"), None, false)
+                                .clicked()
+                            {
+                                menu_split = Some(true);
+                                ui.close();
+                            }
+                            ui::menu_separator(ui);
+                            if split_view
+                                && ui::menu_item(ui, None, tr!("close_pane"), None, false).clicked()
+                            {
+                                menu_close_pane = true;
+                                ui.close();
+                            }
+                            if ui::menu_item(ui, Some("closeSmall"), tr!("close_tab"), None, false)
+                                .clicked()
+                            {
+                                menu_close_tab = true;
+                                ui.close();
+                            }
+                        });
+                    }
                     if pane.term.focused {
                         focused = Some(pane.id);
                     }
@@ -4322,7 +4729,7 @@ impl Ide {
                     let response = ui
                         .interact(
                             grab,
-                            egui::Id::new(("terminal_divider", index)),
+                            egui::Id::unique(("terminal_divider", index)),
                             Sense::drag(),
                         )
                         .on_hover_cursor(if divider.stacked {
@@ -4454,7 +4861,7 @@ impl Ide {
             if let Some(name) = name {
                 ctx.layer_painter(egui::LayerId::new(
                     egui::Order::Tooltip,
-                    egui::Id::new("terminal_drag"),
+                    egui::Id::unique("terminal_drag"),
                 ))
                 .text(
                     pointer + vec2(12.0, 12.0),
@@ -4582,26 +4989,27 @@ impl Ide {
         self.active_terminal = active;
     }
 
-    fn right_panel(&mut self, ctx: &egui::Context) {
+    fn right_panel(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         if let Some(tool) = self.right_tool {
-            let response = egui::SidePanel::right("tool_right")
-                .default_width(340.0)
-                .width_range(220.0..=760.0)
+            let response = egui::Panel::right("tool_right")
+                .default_size(340.0)
+                .size_range(220.0..=760.0)
                 .frame(self.island(ctx))
                 .show_separator_line(false)
-                .show(ctx, |ui| self.tool_panel(ui, tool));
+                .show(ui, |ui| self.tool_panel(ui, tool));
             self.panel_focus(Some(tool.id), response.response.rect);
             return;
         }
         if !self.show_notifications {
             return;
         }
-        let response = egui::SidePanel::right("notifications")
-            .default_width(340.0)
-            .width_range(240.0..=600.0)
+        let response = egui::Panel::right("notifications")
+            .default_size(340.0)
+            .size_range(240.0..=600.0)
             .frame(self.island(ctx))
             .show_separator_line(false)
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 let hide = self.tool_header(ui, "Notifications", |ide, ui| {
                     if ui::icon_button(ui, "delete", tr!("clear_all")).clicked() {
                         ide.notes.clear();
@@ -4678,7 +5086,7 @@ impl Ide {
         ctx.request_repaint_after(Duration::from_millis(500));
         let mut close = None;
         let mut open_log = false;
-        egui::Area::new(egui::Id::new("balloons"))
+        egui::Area::new(egui::Id::unique("balloons"))
             .anchor(Align2::RIGHT_BOTTOM, vec2(-16.0, -(STATUS_HEIGHT + 12.0)))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
@@ -4728,7 +5136,8 @@ impl Ide {
 
     // ---- Editor -------------------------------------------------------------------------
 
-    fn editor(&mut self, ctx: &egui::Context) {
+    fn editor(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         let gutter = self.gutter();
         let mut gutter_command = None;
         let mut reformat = false;
@@ -4743,7 +5152,16 @@ impl Ide {
                 bottom: ISLAND_RADIUS as i8,
                 ..Margin::ZERO
             }))
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
+                // The other groups, and the place left for the main one.
+                let full = ui.available_rect_before_wrap();
+                let main = self.layout_ui(ui, full, None).unwrap_or(full);
+                let ui = &mut ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(main)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                ui.set_clip_rect(main);
                 if self.documents.is_empty() {
                     self.welcome(ui);
                     return;
@@ -4755,16 +5173,8 @@ impl Ide {
                     .iter()
                     .map(|p| self.builtin_enabled(p.id()))
                     .collect();
-                let split_other = self.split_other();
-                let (doc, mut other_doc) = match split_other {
-                    Some(other) => match self.documents.get_disjoint_mut([self.active, other]) {
-                        Ok([doc, other]) => (doc, Some(other)),
-                        Err(_) => return,
-                    },
-                    None => match self.documents.get_mut(self.active) {
-                        Some(doc) => (doc, None),
-                        None => return,
-                    },
+                let Some(doc) = self.documents.get_mut(self.active) else {
+                    return;
                 };
                 if let Some(loading) = &doc.loading {
                     ui.add(
@@ -4813,7 +5223,7 @@ impl Ide {
                             ui.max_rect().right() - width - 22.0,
                             ui.cursor().top() + 8.0,
                         );
-                        egui::Area::new(egui::Id::new("editor_layout"))
+                        egui::Area::new(egui::Id::unique("editor_layout"))
                             .fixed_pos(pos)
                             .order(egui::Order::Middle)
                             .show(ctx, |ui| {
@@ -4867,12 +5277,12 @@ impl Ide {
                         EditorLayout::Split => {
                             let sync = self.scroll_sync.take();
                             let half = (ui.available_width() / 2.0).max(200.0);
-                            egui::SidePanel::right(egui::Id::new(("preview", path)))
+                            egui::Panel::right(egui::Id::unique(("preview", path)))
                                 .resizable(true)
-                                .default_width(half)
-                                .width_range(200.0..=(ui.available_width() - 200.0).max(220.0))
+                                .default_size(half)
+                                .size_range(200.0..=(ui.available_width() - 200.0).max(220.0))
                                 .frame(egui::Frame::NONE)
-                                .show_inside(ui, |ui| {
+                                .show(ui, |ui| {
                                     self.builtins[*plugin].preview(ui, path, &mut doc.text, sync);
                                 });
                         }
@@ -4885,7 +5295,7 @@ impl Ide {
                     let zoom = ui.ctx().input(|i| i.zoom_delta());
                     if (zoom - 1.0).abs() > f32::EPSILON {
                         // One point per notch of a wheel; a touchpad accumulates small steps.
-                        let id = egui::Id::new("editor_wheel_zoom");
+                        let id = egui::Id::unique("editor_wheel_zoom");
                         let total = ui.data_mut(|d| {
                             let acc = d.get_temp_mut_or_default::<f32>(id);
                             *acc += zoom.ln();
@@ -4908,7 +5318,7 @@ impl Ide {
                     } else {
                         let painter = ui.ctx().layer_painter(egui::LayerId::new(
                             egui::Order::Tooltip,
-                            egui::Id::new("zoom_hint"),
+                            egui::Id::unique("zoom_hint"),
                         ));
                         let galley = painter.layout_no_wrap(
                             format!("{} px", self.settings.font_size),
@@ -4934,48 +5344,6 @@ impl Ide {
                     }
                 }
                 let font = FontId::monospace(self.settings.font_size);
-                // The second editor, on the right.
-                if let Some(pane) = self.split.as_mut() {
-                    let down = pane.down;
-                    let mut close = false;
-                    let mut content = |ui: &mut egui::Ui| {
-                        let target: &mut Document = match other_doc.as_mut() {
-                            Some(other) => other,
-                            None => &mut *doc,
-                        };
-                        let separate = split_other.is_some();
-                        split::show(
-                            ui,
-                            pane,
-                            target,
-                            separate.then_some(&self.languages),
-                            !uncolored.contains(&target.language.as_str()),
-                            &self.settings,
-                            t,
-                            font.clone(),
-                        )
-                    };
-                    if down {
-                        let half = (ui.available_height() / 2.0).max(120.0);
-                        egui::TopBottomPanel::bottom(egui::Id::new("split_editor"))
-                            .resizable(true)
-                            .default_height(half)
-                            .height_range(80.0..=(ui.available_height() - 80.0).max(100.0))
-                            .frame(egui::Frame::NONE)
-                            .show_inside(ui, |ui| close = content(ui));
-                    } else {
-                        let half = (ui.available_width() / 2.0).max(240.0);
-                        egui::SidePanel::right(egui::Id::new("split_editor"))
-                            .resizable(true)
-                            .default_width(half)
-                            .width_range(160.0..=(ui.available_width() - 160.0).max(180.0))
-                            .frame(egui::Frame::NONE)
-                            .show_inside(ui, |ui| close = content(ui));
-                    }
-                    if close {
-                        self.split = None;
-                    }
-                }
                 let annotations = gutter.annotations.as_deref();
                 let assist = self
                     .languages
@@ -5018,7 +5386,7 @@ impl Ide {
                     breadcrumbs: !self.settings.breadcrumbs_off,
                     spellcheck: !self.settings.spellcheck_off,
                 };
-                let editor_id = egui::Id::new(("source", doc.path.clone(), self.active));
+                let editor_id = egui::Id::unique(("source", doc.path.clone(), self.active));
                 let output = doc.view.show(ui, editor_id, &mut doc.text, &options);
                 self.cursor = (output.line, output.column);
                 self.problems = (output.errors, output.warnings);
@@ -5131,7 +5499,7 @@ impl Ide {
             ui.spacing_mut().item_spacing.x = 2.0;
             let more = ui::icon_button(ui, "moreVertical", tr!("tab_options"));
             egui::Popup::menu(&more)
-                .id(egui::Id::new("tabs_more"))
+                .id(egui::Id::unique("tabs_more"))
                 .show(|ui| {
                     ui::menu_begin(ui);
                     if ui::menu_item(ui, Some("closeSmall"), tr!("close_tab"), None, false)
@@ -5167,16 +5535,16 @@ impl Ide {
                         self.split_to(true);
                         ui.close();
                     }
-                    if self.split.is_some()
+                    if self.has_splits()
                         && ui::menu_item(ui, None, tr!("close_split"), None, false).clicked()
                     {
-                        self.split = None;
+                        self.close_splits();
                         ui.close();
                     }
                 });
             let list = ui::icon_button(ui, "chevronDown", tr!("open_tabs"));
             egui::Popup::menu(&list)
-                .id(egui::Id::new("tabs_list"))
+                .id(egui::Id::unique("tabs_list"))
                 .show(|ui| {
                     ui::menu_begin(ui);
                     for (i, doc) in self.documents.iter().enumerate() {
@@ -5216,6 +5584,8 @@ impl Ide {
                             if response.dragged() && ui.input(|i| i.pointer.is_decidedly_dragging())
                             {
                                 self.doc_drag = Some(i);
+                                self.tab_drag =
+                                    Some((groups::TabDrag::Main(i), egui::ViewportId::ROOT));
                             }
                             if active {
                                 ui.painter().rect(
@@ -5244,7 +5614,7 @@ impl Ide {
                             );
                             let close_response = ui.interact(
                                 close_rect,
-                                egui::Id::new(("tab_close", i)),
+                                egui::Id::unique(("tab_close", i)),
                                 Sense::click(),
                             );
                             if doc.dirty() && !response.hovered() && !close_response.hovered() {
@@ -5303,6 +5673,30 @@ impl Ide {
                                 }
                                 if has_path {
                                     ui::menu_separator(ui);
+                                    for (icon, label, down) in [
+                                        ("sideBySide", tr!("split_right"), false),
+                                        ("unified", tr!("split_down"), true),
+                                    ] {
+                                        if ui::menu_item(ui, Some(icon), label, None, false)
+                                            .clicked()
+                                        {
+                                            action = Some(TabAction::Split(i, down));
+                                            ui.close();
+                                        }
+                                    }
+                                    if ui::menu_item(
+                                        ui,
+                                        Some("openNewTab"),
+                                        tr!("open_in_new_window"),
+                                        None,
+                                        false,
+                                    )
+                                    .clicked()
+                                    {
+                                        action = Some(TabAction::Detach(i));
+                                        ui.close();
+                                    }
+                                    ui::menu_separator(ui);
                                     if ui::menu_item(
                                         ui,
                                         Some("copy"),
@@ -5358,8 +5752,9 @@ impl Ide {
         self.tab_drag(ui, bar, &tab_rects, &t);
     }
 
-    /// Drag along the tab bar reorders the editor tabs.
+    /// Drag along the tab bar reorders the editor tabs; elsewhere the groups take the drop.
     fn tab_drag(&mut self, ui: &egui::Ui, bar: Rect, rects: &[Rect], t: &Theme) {
+        self.main_bar = Some(bar);
         let Some(from) = self.doc_drag else { return };
         let ctx = ui.ctx();
         let pointer = ctx.pointer_interact_pos().filter(|p| bar.contains(*p));
@@ -5419,6 +5814,8 @@ impl Ide {
     fn tab_action(&mut self, action: TabAction) {
         let path_of = |ide: &Ide, i: usize| ide.documents.get(i).and_then(|d| d.path.clone());
         match action {
+            TabAction::Split(i, down) => self.split_doc(i, down),
+            TabAction::Detach(i) => self.detach(i, None),
             TabAction::CloseOthers(i) => {
                 self.active = i.min(self.documents.len().saturating_sub(1));
                 self.retain_documents(|n| n == i);
@@ -5492,23 +5889,31 @@ impl Ide {
 
     // ---- Status bar ---------------------------------------------------------------------
 
-    fn status_bar(&mut self, ctx: &egui::Context) {
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         let t = self.theme(ctx);
         let mut open_problems = false;
         // Chosen in the menus of the encoding and of the line endings.
         let mut encoding_change: Option<(crate::encoding::TextEncoding, bool)> = None;
         let mut ending_change: Option<crate::encoding::LineEnding> = None;
-        egui::TopBottomPanel::bottom("status")
-            .exact_height(STATUS_HEIGHT)
+        egui::Panel::bottom("status")
+            .exact_size(STATUS_HEIGHT)
             .frame(
                 egui::Frame::new()
                     .fill(t.frame)
                     .inner_margin(Margin::symmetric(8, 0)),
             )
             .show_separator_line(false)
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
+                    // A project in a WSL distribution: WSL before its path.
+                    if let Some(wsl) = crate::wsl::parse(&self.root) {
+                        // Not a button: nothing lights up under the pointer.
+                        ui::status_text_fixed(ui, "WSL", "WSL")
+                            .on_hover_text(trf!("wsl_distribution", distro = wsl.distro));
+                        ui.add_space(4.0);
+                    }
                     // Breadcrumbs: project, folders, file.
                     let mut crumbs = vec![(
                         self.root
@@ -5641,8 +6046,19 @@ impl Ide {
                         }
                         self.each_builtin(|plugin, ide| plugin.status_bar(ui, ide));
                         if let Some(doc) = self.documents.get(self.active) {
-                            // Sampled: a full scan on every frame freezes big files.
-                            let sample = doc.text.lines().take(2000).collect::<Vec<_>>().join("\n");
+                            // Sampled, on every frame: the first 2000 lines within the first
+                            // 64 KB, borrowed. A minified file is one line of megabytes; copying
+                            // it each frame made scrolling stutter.
+                            let mut end = doc.text.len().min(64 * 1024);
+                            while !doc.text.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            let head = &doc.text[..end];
+                            let end = head
+                                .match_indices('\n')
+                                .nth(1999)
+                                .map_or(head.len(), |(i, _)| i);
+                            let sample = &head[..end];
                             let indent = if sample.contains("\n\t") {
                                 tr!("tab").to_string()
                             } else {
@@ -5664,7 +6080,7 @@ impl Ide {
                                 .on_hover_text(tr!("line_endings_tooltip"));
                             let current = doc.encoding;
                             egui::Popup::menu(&encoding)
-                                .id(egui::Id::new("status_encoding"))
+                                .id(egui::Id::unique("status_encoding"))
                                 .show(|ui| {
                                     ui::menu_begin(ui);
                                     for (title, reopen) in [
@@ -5685,7 +6101,7 @@ impl Ide {
                                     }
                                 });
                             egui::Popup::menu(&endings)
-                                .id(egui::Id::new("status_line_endings"))
+                                .id(egui::Id::unique("status_line_endings"))
                                 .show(|ui| {
                                     ui::menu_begin(ui);
                                     ui::menu_title(ui, tr!("line_endings"));
@@ -5780,7 +6196,7 @@ impl Ide {
         self.run_dialog(ctx);
         self.tree_dialogs(ctx);
         if self.show_new_file {
-            let modal = egui::Modal::new(egui::Id::new("new_file")).show(ctx, |ui| {
+            let modal = egui::Modal::new(egui::Id::unique("new_file")).show(ctx, |ui| {
                 ui.set_width(420.0);
                 ui::dialog_title(ui, tr!("new_file"));
                 let field = ui.add(
@@ -5827,7 +6243,7 @@ impl Ide {
         self.switcher(ctx);
         self.each_builtin(|plugin, ide| plugin.windows(ctx, ide));
         if let Some((pane, agent)) = self.mcp_offer {
-            let modal = egui::Modal::new(egui::Id::new("mcp_offer")).show(ctx, |ui| {
+            let modal = egui::Modal::new(egui::Id::unique("mcp_offer")).show(ctx, |ui| {
                 ui.set_width(500.0);
                 ui::dialog_title(ui, &trf!("connect_atelier", agent = agent.name()));
                 ui.label(trf!("atelier_can_give_access_tools", agent = agent.name()));
@@ -5853,6 +6269,12 @@ impl Ide {
                     {
                         choice = Some(0);
                     }
+                    if ui::button(ui, tr!("connect_every_project"))
+                        .on_hover_text(tr!("connect_every_project_hint"))
+                        .clicked()
+                    {
+                        choice = Some(3);
+                    }
                     if ui::button(ui, tr!("don_t_ask_again")).clicked() {
                         choice = Some(2);
                     }
@@ -5871,13 +6293,14 @@ impl Ide {
                     2 => {
                         self.settings.mcp_choices.insert(key, false);
                     }
+                    3 => self.connect_mcp_everywhere(agent),
                     _ => {}
                 }
                 self.release_enter(pane);
             }
         }
         if let Some(path) = self.project_choice.clone() {
-            let modal = egui::Modal::new(egui::Id::new("project_choice")).show(ctx, |ui| {
+            let modal = egui::Modal::new(egui::Id::unique("project_choice")).show(ctx, |ui| {
                 ui.set_width(460.0);
                 ui::dialog_title(ui, tr!("open_project"));
                 ui.label(trf!(
@@ -5916,7 +6339,7 @@ impl Ide {
             }
         }
         if let Some(action) = self.pending.clone() {
-            egui::Modal::new(egui::Id::new("unsaved")).show(ctx, |ui| {
+            egui::Modal::new(egui::Id::unique("unsaved")).show(ctx, |ui| {
                 ui.set_width(460.0);
                 ui::dialog_title(ui, tr!("unsaved_changes"));
                 ui.label(tr!("save_modified_files_before_continuing"));
@@ -6056,8 +6479,8 @@ impl Ide {
                     .map(|p| {
                         p.strip_prefix(&self.root)
                             .unwrap_or(p)
-                            .display()
-                            .to_string()
+                            .to_string_lossy()
+                            .replace('\\', "/")
                     })
                     .unwrap_or_default(),
                 icon: None,
@@ -6111,14 +6534,39 @@ impl Ide {
         {
             return hits.clone();
         }
+        // The name holds the query (at its start first), else its path does, else the letters of
+        // the query are in the name in this order (`apprs` finds `app.rs`). A query with a `/`
+        // is a path.
+        let query = query.trim().replace('\\', "/");
+        let by_path = query.contains('/');
         let mut matches: Vec<_> = self
             .file_index
             .entries()
             .iter()
-            .filter(|e| e.name.contains(query))
+            .filter_map(|e| {
+                let tier = if by_path {
+                    e.rel.contains(&query).then_some(1)?
+                } else if e.name.starts_with(&query) {
+                    0
+                } else if e.name.contains(&query) {
+                    1
+                } else if e.rel.contains(&query) {
+                    2
+                } else if in_order(&query, &e.name) {
+                    3
+                } else {
+                    return None;
+                };
+                Some((tier, e))
+            })
             .collect();
-        // Names starting with the query first, then the shortest.
-        matches.sort_by_key(|e| (!e.name.starts_with(query), e.name.len()));
+        // In the order of their paths for the rest, whatever order the disk listed them in.
+        matches.sort_by(|(a_tier, a), (b_tier, b)| {
+            (*a_tier, a.name.len(), a.rel.len())
+                .cmp(&(*b_tier, b.name.len(), b.rel.len()))
+                .then_with(|| a.rel.cmp(&b.rel))
+        });
+        let matches = matches.into_iter().map(|(_, e)| e);
         let hits: Vec<Hit> = matches
             .into_iter()
             .take(60)
@@ -6127,7 +6575,7 @@ impl Ide {
                 let relative = path
                     .parent()
                     .and_then(|p| p.strip_prefix(&self.root).ok())
-                    .map(|p| p.display().to_string())
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
                     .unwrap_or_default();
                 Hit {
                     label: path
@@ -6194,7 +6642,8 @@ impl Ide {
                     hits.push(Hit {
                         label: label.to_string(),
                         hint: hint.to_string(),
-                        icon: Some("git"),
+                        // The icon of the plugin the command belongs to.
+                        icon: Some(plugin.icon()),
                         file: None,
                         target: Target::Builtin(plugin.id(), command.id),
                     });
@@ -6206,8 +6655,70 @@ impl Ide {
             self.file_index.poll();
             self.file_index.refresh(&self.root, move || repaint());
             hits.extend(self.file_hits(&query));
+            hits.extend(self.text_hits());
         }
         hits
+    }
+
+    /// The matches of the text typed in the files of the project, as they arrive. The search
+    /// starts again when the text changes.
+    fn text_hits(&mut self) -> Vec<Hit> {
+        let query = self.palette_query.trim().to_string();
+        if query.chars().count() < TEXT_MIN_QUERY {
+            self.stop_text_search();
+            return Vec::new();
+        }
+        if self.palette_text.as_ref().is_none_or(|s| s.query != query) {
+            self.stop_text_search();
+            let Ok(re) = crate::search::build(&query, crate::search::Options::default()) else {
+                return Vec::new();
+            };
+            let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (root, stop, repaint) = (self.root.clone(), cancel.clone(), self.repaint.clone());
+            std::thread::spawn(move || {
+                crate::search::search_project(&root, &re, "", &stop, TEXT_MAX_HITS, |hits| {
+                    let _ = tx.send(hits);
+                    repaint();
+                });
+            });
+            self.palette_text = Some(PaletteText {
+                query,
+                cancel,
+                rx,
+                hits: Vec::new(),
+            });
+        }
+        let root = self.root.clone();
+        let Some(search) = &mut self.palette_text else {
+            return Vec::new();
+        };
+        while let Ok(found) = search.rx.try_recv() {
+            let relative = found
+                .path
+                .strip_prefix(&root)
+                .unwrap_or(&found.path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            for hit in found.hits {
+                search.hits.push(Hit {
+                    label: hit.text.clone(),
+                    hint: format!("{relative}:{}", hit.line + 1),
+                    icon: None,
+                    file: Some(found.path.clone()),
+                    target: Target::Text(found.path.clone(), hit.line, hit.column, hit.length),
+                });
+            }
+        }
+        search.hits.clone()
+    }
+
+    fn stop_text_search(&mut self) {
+        if let Some(search) = self.palette_text.take() {
+            search
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     /// Search Everywhere: a popup under the title bar, driven by the keyboard.
@@ -6236,7 +6747,7 @@ impl Ide {
             .then(|| hits.get(self.palette_index).map(|h| h.target.clone()))
             .flatten();
         let width = 680.0_f32.min(ctx.content_rect().width() - 40.0);
-        let area = egui::Area::new(egui::Id::new("search_everywhere"))
+        let area = egui::Area::new(egui::Id::unique("search_everywhere"))
             .anchor(Align2::CENTER_TOP, vec2(0.0, 90.0))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
@@ -6302,66 +6813,107 @@ impl Ide {
                                     self.palette_index = 0;
                                 }
                             });
-                        ui.separator();
-                        egui::ScrollArea::vertical()
-                            .max_height(420.0)
-                            .show(ui, |ui| {
-                                ui.spacing_mut().item_spacing.y = 0.0;
-                                if hits.is_empty() {
-                                    ui.add_space(12.0);
-                                    ui.vertical_centered(|ui| {
-                                        ui.label(
-                                            RichText::new(tr!("no_results"))
-                                                .color(t.text_secondary),
-                                        );
-                                    });
-                                    ui.add_space(12.0);
-                                }
-                                for (i, hit) in hits.iter().enumerate() {
-                                    let selected = i == self.palette_index;
-                                    let (rect, response) = ui::row(ui, selected);
-                                    if selected && (down || up) {
-                                        response.scroll_to_me(None);
+                        // A line under the field, from one edge of the popup to the other.
+                        let (line, _) = ui.allocate_exact_size(vec2(width, 1.0), Sense::hover());
+                        ui.painter().rect_filled(line, 0.0, t.border);
+                        // The list is as high as its rows, up to PALETTE_ROWS of them, and is
+                        // given that height: left to take what the popup had at the frame
+                        // before, it stayed as small as it was when the search began, with
+                        // rows cut in two.
+                        let height = if hits.is_empty() {
+                            44.0
+                        } else if hits.len() > PALETTE_ROWS {
+                            // Whole rows: the room under the last one is scrolled to.
+                            PALETTE_ROWS as f32 * ui::ROW + PALETTE_PAD
+                        } else {
+                            hits.len() as f32 * ui::ROW + 2.0 * PALETTE_PAD
+                        };
+                        ui.allocate_ui(vec2(width, height), |ui| {
+                            egui::ScrollArea::vertical()
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    ui.spacing_mut().item_spacing.y = 0.0;
+                                    if !hits.is_empty() {
+                                        ui.add_space(PALETTE_PAD);
                                     }
-                                    let icon = Rect::from_min_size(
-                                        pos2(rect.left() + 16.0, rect.center().y - 8.0),
-                                        vec2(16.0, 16.0),
-                                    );
-                                    match (&hit.file, hit.icon) {
-                                        (Some(path), _) => {
-                                            egui::Image::new(self.file_icon(ui.ctx(), path))
-                                                .paint_at(ui, icon)
+                                    if hits.is_empty() {
+                                        ui.add_space(12.0);
+                                        ui.vertical_centered(|ui| {
+                                            ui.label(
+                                                RichText::new(tr!("no_results"))
+                                                    .color(t.text_secondary),
+                                            );
+                                        });
+                                        ui.add_space(12.0);
+                                    }
+                                    for (i, hit) in hits.iter().enumerate() {
+                                        let selected = i == self.palette_index;
+                                        let (rect, response) = ui::row(ui, selected);
+                                        if selected && (down || up) {
+                                            response.scroll_to_me(None);
                                         }
-                                        (None, Some(name)) => ui::paint_icon(ui, name, icon),
-                                        _ => {}
+                                        let icon = Rect::from_min_size(
+                                            pos2(rect.left() + 16.0, rect.center().y - 8.0),
+                                            vec2(16.0, 16.0),
+                                        );
+                                        match (&hit.file, hit.icon) {
+                                            (Some(path), _) => {
+                                                egui::Image::new(self.file_icon(ui.ctx(), path))
+                                                    .paint_at(ui, icon)
+                                            }
+                                            (None, Some(name)) => ui::paint_icon(ui, name, icon),
+                                            _ => {}
+                                        }
+                                        // The label and its hint share the row, cut with `…`
+                                        // rather than over each other or out of the popup: the
+                                        // hint takes at most 45 % of it.
+                                        let x = icon.right() + 8.0;
+                                        let room = (rect.right() - 16.0 - x).max(0.0);
+                                        let hint = ui::elided(
+                                            ui,
+                                            &hit.hint,
+                                            FontId::proportional(12.0),
+                                            t.text_secondary,
+                                            room * 0.45,
+                                        );
+                                        let hint_w = if hit.hint.is_empty() {
+                                            0.0
+                                        } else {
+                                            hint.size().x + 16.0
+                                        };
+                                        let label = ui::elided(
+                                            ui,
+                                            &hit.label,
+                                            FontId::proportional(13.0),
+                                            t.text,
+                                            (room - hint_w).max(0.0),
+                                        );
+                                        let painter = ui.painter().with_clip_rect(rect);
+                                        painter.galley(
+                                            pos2(x, rect.center().y - label.size().y / 2.0),
+                                            label,
+                                            t.text,
+                                        );
+                                        painter.galley(
+                                            pos2(
+                                                rect.right() - 16.0 - hint.size().x,
+                                                rect.center().y - hint.size().y / 2.0,
+                                            ),
+                                            hint,
+                                            t.text_secondary,
+                                        );
+                                        if response.clicked() {
+                                            chosen = Some(hit.target.clone());
+                                        }
+                                        if response.hovered()
+                                            && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO)
+                                        {
+                                            self.palette_index = i;
+                                        }
                                     }
-                                    let end = ui::paint_text(
-                                        ui,
-                                        rect,
-                                        icon.right() + 8.0,
-                                        &hit.label,
-                                        t.text,
-                                        FontId::proportional(13.0),
-                                    );
-                                    ui.painter().with_clip_rect(rect).text(
-                                        pos2(rect.right() - 16.0, rect.center().y),
-                                        Align2::RIGHT_CENTER,
-                                        &hit.hint,
-                                        FontId::proportional(12.0),
-                                        t.text_secondary,
-                                    );
-                                    let _ = end;
-                                    if response.clicked() {
-                                        chosen = Some(hit.target.clone());
-                                    }
-                                    if response.hovered()
-                                        && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO)
-                                    {
-                                        self.palette_index = i;
-                                    }
-                                }
-                                ui.add_space(4.0);
-                            });
+                                    ui.add_space(PALETTE_PAD);
+                                });
+                        });
                     });
             });
         let clicked_outside = ctx.input(|i| i.pointer.any_pressed())
@@ -6370,6 +6922,9 @@ impl Ide {
                 .is_some_and(|p| !area.response.rect.contains(p));
         if escape || clicked_outside {
             self.show_palette = false;
+        }
+        if chosen.is_some() || !self.show_palette {
+            self.stop_text_search();
         }
         if let Some(target) = chosen {
             self.show_palette = false;
@@ -6380,6 +6935,9 @@ impl Ide {
                 Target::File(path) => self.open_file(path),
                 Target::Line(line, column) => self.go_to_line(line, column),
                 Target::Place(path, line) => Host::open_at(self, path, line, 0, 0),
+                Target::Text(path, line, column, length) => {
+                    Host::open_at(self, path, line, column, length)
+                }
                 Target::Version(path) => self.compare_version(&path),
             }
         }
@@ -6465,7 +7023,8 @@ impl Ide {
         let disabled: BTreeSet<String> = (states.builtin.clone().into_iter())
             .filter(|(id, state)| match state {
                 PluginState::Set(on) => !on,
-                PluginState::Auto(_) => !self.auto_on(id),
+                // A language whose files are not known yet is on until they are.
+                PluginState::Auto(_) => !self.auto_on(id).unwrap_or(true),
             })
             .map(|(id, _)| id)
             .collect();
@@ -6565,7 +7124,10 @@ impl Ide {
         self.auto_checked = Instant::now();
         let ids: Vec<String> = self.auto_plugins.iter().cloned().collect();
         for id in ids {
-            let on = self.auto_on(&id);
+            // Not known yet (the project is being read): the plugin stays as it is.
+            let Some(on) = self.auto_on(&id) else {
+                continue;
+            };
             if on != self.settings.disabled_builtins.contains(&id) {
                 continue;
             }
@@ -6581,24 +7143,60 @@ impl Ide {
     }
 
     /// Whether a plugin left to the IDE (`"auto"`) is on: Git while the project has a `.git`, a
-    /// language while it has one of its files (read again every 5 seconds at most).
-    fn auto_on(&mut self, id: &str) -> bool {
+    /// language while it has one of its files. None while the files of the project have not
+    /// been read yet.
+    fn auto_on(&mut self, id: &str) -> Option<bool> {
         if id == "git" {
-            return self.root.join(".git").exists();
+            return Some(self.root.join(".git").exists());
         }
         let extensions = match self.builtins.iter().find(|p| p.id() == id) {
             Some(plugin) if !plugin.file_extensions().is_empty() => plugin.file_extensions(),
-            _ => return true,
+            _ => return Some(true),
         };
-        let stale = self
-            .project_extensions
-            .as_ref()
-            .is_none_or(|(at, _)| at.elapsed() > Duration::from_secs(30));
-        if stale {
-            self.project_extensions = Some((Instant::now(), project_extensions(&self.root)));
+        let found = self.known_extensions()?;
+        Some(extensions.iter().any(|e| found.contains(*e)))
+    }
+
+    /// The extensions of the files of the project, read again every 30 seconds at most, in the
+    /// background: the whole project is walked, which a slow disk (a WSL distribution) takes
+    /// its time to answer. None until the first reading is done; the last one meanwhile.
+    fn known_extensions(&mut self) -> Option<&BTreeSet<String>> {
+        use std::sync::mpsc::TryRecvError;
+        if let Some((root, answer)) = &self.extensions_job {
+            match answer.try_recv() {
+                Ok(found) => {
+                    // Another project was opened meanwhile: not its extensions.
+                    if *root == self.root {
+                        self.project_extensions = Some((Instant::now(), found));
+                    }
+                    self.extensions_job = None;
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => self.extensions_job = None,
+            }
         }
-        let found = &self.project_extensions.as_ref().expect("just read").1;
-        extensions.iter().any(|e| found.contains(*e))
+        let stale = (self.project_extensions.as_ref())
+            .is_none_or(|(at, _)| at.elapsed() > Duration::from_secs(30));
+        if stale && self.extensions_job.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let root = self.root.clone();
+            let repaint = self.repaint.clone();
+            self.extensions_job = Some((root.clone(), rx));
+            std::thread::spawn(move || {
+                if tx.send(project_extensions(&root)).is_ok() {
+                    repaint();
+                }
+            });
+        }
+        self.project_extensions.as_ref().map(|(_, found)| found)
+    }
+
+    /// Waits for the extensions of the project being read.
+    #[cfg(test)]
+    fn wait_extensions(&mut self) {
+        while self.known_extensions().is_none() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     fn set_builtin_enabled(&mut self, id: &str, enabled: bool) {
@@ -6653,17 +7251,26 @@ impl Ide {
 
     /// Closes the tool windows of plugins that no longer apply (another project was opened).
     fn close_missing_tools(&mut self) {
-        let tools = self.tool_windows();
+        // Every frame: nothing is listed, and nothing is looked at while no window is open.
         let gone = |tool: Option<&'static ToolWindow>| {
-            tool.is_some_and(|t| !tools.iter().any(|w| w.id == t.id))
+            tool.is_some_and(|t| {
+                !(self.builtins.iter())
+                    .filter(|p| self.builtin_enabled(p.id()) && p.applies())
+                    .any(|p| p.tool_windows().iter().any(|w| w.id == t.id))
+            })
         };
-        if gone(self.left_tool) {
+        let (left, right, bottom) = (
+            gone(self.left_tool),
+            gone(self.right_tool),
+            gone(self.bottom_tool),
+        );
+        if left {
             self.left_tool = None;
         }
-        if gone(self.right_tool) {
+        if right {
             self.right_tool = None;
         }
-        if gone(self.bottom_tool) {
+        if bottom {
             self.bottom_tool = None;
         }
     }
@@ -6788,6 +7395,23 @@ impl Ide {
             .collect()
     }
 
+    /// Every frame: the language service is told again only when the plugins that are on are
+    /// no longer the same (one was turned on or off, a native one was loaded).
+    fn follow_plugin_languages(&mut self) {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for plugin in &self.builtins {
+            if self.builtin_enabled(plugin.id()) {
+                plugin.id().hash(&mut hasher);
+            }
+        }
+        let key = hasher.finish();
+        if self.languages_key != Some(key) {
+            self.languages_key = Some(key);
+            self.sync_plugin_languages();
+        }
+    }
+
     /// Gives the language service the formatters and the JSON schemas of the plugins that are on.
     fn sync_plugin_languages(&self) {
         let on = || {
@@ -6806,7 +7430,7 @@ impl Ide {
             i.raw
                 .dropped_files
                 .iter()
-                .filter_map(|f| f.path.clone())
+                .map(|f| f.path().to_path_buf())
                 .collect()
         });
         for path in dropped {
@@ -6828,6 +7452,10 @@ enum TreeDialog {
 
 /// Action chosen in the menu of an editor tab.
 enum TabAction {
+    /// The file of the tab in the second editor, beside (false) or under (true) the first.
+    Split(usize, bool),
+    /// The file of the tab in a window of its own.
+    Detach(usize),
     CloseOthers(usize),
     CloseRight(usize),
     CloseAll,
@@ -7128,6 +7756,18 @@ impl Ide {
                 self.run_configs().temporary("gradle build", "gradle build");
                 self.open_run_dialog();
             }
+            // The editor split (`right`, `down`), or the file in a window of its own (`window`).
+            match std::env::var("ATELIER_SHOT_SPLIT").as_deref() {
+                Ok("right") => self.split_to(false),
+                Ok("down") => self.split_to(true),
+                Ok("window") => self.detach(self.active, None),
+                _ => {}
+            }
+            // Search Everywhere, with this typed in it.
+            if let Ok(query) = std::env::var("ATELIER_SHOT_PALETTE") {
+                self.open_palette();
+                self.palette_query = query;
+            }
             if let Ok(query) = std::env::var("ATELIER_SHOT_SYMBOLS") {
                 self.open_palette_as(PaletteMode::Symbols);
                 self.palette_query = query;
@@ -7183,14 +7823,13 @@ impl Ide {
                 20
             }
         {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+            ctx.request_screenshot(|image| {
+                *SHOT.lock().unwrap_or_else(|e| e.into_inner()) = Some(image)
+            });
         }
-        let image = ctx.input(|i| {
-            i.raw.events.iter().find_map(|e| match e {
-                egui::Event::Screenshot { image, .. } => Some(image.clone()),
-                _ => None,
-            })
-        });
+        // The pixels arrive in a callback, a frame or two later.
+        static SHOT: std::sync::Mutex<Option<Arc<egui::ColorImage>>> = std::sync::Mutex::new(None);
+        let image = SHOT.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(image) = image {
             let _ = image::save_buffer(
                 &path,
@@ -7264,7 +7903,8 @@ impl eframe::App for Ide {
         }
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = &ui.ctx().clone();
         #[cfg(debug_assertions)]
         self.debug_screenshot(ctx);
         self.apply_pending_nav();
@@ -7291,7 +7931,7 @@ impl eframe::App for Ide {
             }
         }
         self.each_builtin(|plugin, ide| plugin.update(ctx, ide));
-        self.sync_plugin_languages();
+        self.follow_plugin_languages();
         if ctx.input(|i| i.viewport().close_requested()) && !self.can_quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.request(Pending::Quit);
@@ -7301,7 +7941,7 @@ impl eframe::App for Ide {
         }
         if self.start_screen {
             Self::resize_edges(ctx);
-            self.start_screen_ui(ctx);
+            self.start_screen_ui(ui);
             self.dialogs(ctx);
             self.balloons(ctx);
             return;
@@ -7355,14 +7995,16 @@ impl eframe::App for Ide {
         self.dropped_files(ctx);
         Self::resize_edges(ctx);
         self.close_missing_tools();
-        self.toolbar(ctx);
-        self.status_bar(ctx);
-        self.stripe(ctx, Dock::Left);
-        self.stripe(ctx, Dock::Right);
-        self.left_panel(ctx);
-        self.right_panel(ctx);
-        self.bottom_panel(ctx);
-        self.editor(ctx);
+        self.toolbar(ui);
+        self.status_bar(ui);
+        self.stripe(ui, Dock::Left);
+        self.stripe(ui, Dock::Right);
+        self.left_panel(ui);
+        self.right_panel(ui);
+        self.bottom_panel(ui);
+        self.editor(ui);
+        self.group_drag_ui(ctx);
+        self.editor_windows(ctx);
         self.dialogs(ctx);
         self.log_status();
         self.balloons(ctx);

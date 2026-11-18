@@ -563,7 +563,7 @@ impl Ide {
         let mut command = None;
         let mut builtin_command = None;
         let (mut ok, mut cancel, mut apply) = (false, false, false);
-        let modal = egui::Modal::new(egui::Id::new("settings"))
+        let modal = egui::Modal::new(egui::Id::unique("settings"))
             .frame(
                 egui::Frame::new()
                     .fill(t.popup)
@@ -636,7 +636,7 @@ impl Ide {
                 });
             });
         // Escape cancels; Enter confirms unless a field takes it.
-        let typing = ctx.wants_keyboard_input();
+        let typing = ctx.egui_wants_keyboard_input();
         cancel |= ctx.input(|i| i.key_pressed(egui::Key::Escape)) || modal.should_close();
         let fresh = std::mem::take(&mut self.settings_fresh);
         ok |= !typing && !fresh && ctx.input(|i| i.key_pressed(egui::Key::Enter));

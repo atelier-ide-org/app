@@ -138,10 +138,11 @@ fn window_renders() {
     )
     .ok();
     for _ in 0..2 {
-        let _ = ctx.run(Default::default(), |ctx| {
+        ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default()
-                .show(ctx, |ui| plugin.tool_window("k8s.resources", ui, &mut host));
-        });
+                .show(ui, |ui| plugin.tool_window("k8s.resources", ui, &mut host));
+        })
+        .drop_without_applying_deltas();
     }
     assert!(plugin.editor.is_some());
     plugin.confirm = Some(Confirm {
@@ -151,10 +152,11 @@ fn window_renders() {
         args: Vec::new(),
     });
     for _ in 0..2 {
-        let _ = ctx.run(Default::default(), |ctx| {
+        ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default()
-                .show(ctx, |ui| plugin.tool_window("k8s.resources", ui, &mut host));
-        });
+                .show(ui, |ui| plugin.tool_window("k8s.resources", ui, &mut host));
+        })
+        .drop_without_applying_deltas();
     }
     assert!(plugin.confirm.is_some());
 }

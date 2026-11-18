@@ -93,7 +93,7 @@ impl Ide {
         let title = trf!("reformat_file_2", doc = doc.title());
         let has_selection = !doc.view.selection().is_empty();
         let has_path = doc.path.is_some();
-        let modal = egui::Modal::new(egui::Id::new("reformat")).show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::unique("reformat")).show(ctx, |ui| {
             ui.set_width(420.0);
             ui::dialog_title(ui, &title);
             ui::section(ui, tr!("options"));

@@ -18,6 +18,9 @@ pub struct Entry {
     pub path: PathBuf,
     /// The file name in lower case, to compare with what is typed.
     pub name: String,
+    /// The path from the root of the project in lower case, with `/`: a query with a `/` is
+    /// compared with it (`src/app` finds `src/app.rs`).
+    pub rel: String,
 }
 
 #[derive(Default)]
@@ -67,6 +70,12 @@ impl Index {
                         .unwrap_or_default()
                         .to_string_lossy()
                         .to_lowercase(),
+                    rel: path
+                        .strip_prefix(&root)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                        .to_lowercase(),
                     path,
                 })
                 .collect();
@@ -90,21 +99,40 @@ impl Index {
     }
 }
 
-/// Project files: hidden folders, dependencies and build output are skipped.
+/// Project files: the `.git` folder, dependencies and build output are skipped.
+///
+/// The kind of an entry (file, folder, link) comes with the listing of its folder: nothing more
+/// is asked of the disk for it. Asking each entry in turn, several times, made the list of a
+/// big project (or of one on a slow disk, such as a WSL share) take seconds.
 pub fn list(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(children) = project::searchable_children(&dir) else {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
-        for child in children {
-            if child.is_dir() {
-                if !child.is_symlink() {
-                    stack.push(child);
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name
+                .to_str()
+                .is_some_and(|n| n == ".git" || project::is_library(n))
+            {
+                continue;
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_dir() {
+                stack.push(path);
+            } else if kind.is_symlink() {
+                // A link to a folder is not followed (it may lead back here); one to a file is
+                // a file.
+                if !path.is_dir() {
+                    files.push(path);
                 }
             } else {
-                files.push(child);
+                files.push(path);
             }
             if files.len() >= MAX_FILES {
                 return files;
@@ -113,3 +141,7 @@ pub fn list(root: &Path) -> Vec<PathBuf> {
     }
     files
 }
+
+#[cfg(test)]
+#[path = "../../test/app/file_index/tests.rs"]
+mod tests;

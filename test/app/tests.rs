@@ -230,21 +230,23 @@ fn frame_mod(
     events: Vec<egui::Event>,
     modifiers: egui::Modifiers,
 ) {
-    let _ = ctx.run(
+    ctx.run_ui(
         egui::RawInput {
-            modifiers,
             screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1440.0, 920.0))),
             time: Some(time),
-            events,
+            // The keys held come with the events.
+            events: [vec![egui::Event::ModifiersChanged(modifiers)], events].concat(),
             ..Default::default()
         },
-        |ctx| {
+        |ui| {
+            let ctx = &ui.ctx().clone();
             ide.track_focus(ctx);
-            ide.left_panel(ctx);
-            ide.editor(ctx);
+            ide.left_panel(ui);
+            ide.editor(ui);
             ide.dialogs(ctx);
         },
-    );
+    )
+    .drop_without_applying_deltas();
 }
 
 #[test]
@@ -403,6 +405,7 @@ fn the_tree_follows_changes_made_outside() {
     fs::remove_file(base.join("a.txt")).unwrap();
     ide.last_watch = Instant::now() - Duration::from_secs(2);
     ide.watch_files(&ctx);
+    ide.wait_disk();
     step(&mut ide);
     step(&mut ide);
     assert_eq!(names(&ide, &base), ["sub", "new.txt"]);
@@ -539,26 +542,29 @@ fn dragging_a_file_onto_a_folder_moves_it() {
 }
 
 fn frame(ctx: &egui::Context, ide: &mut Ide) {
-    let output = ctx.run(
+    let mut output = ctx.run_ui(
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1440.0, 920.0))),
             ..Default::default()
         },
-        |ctx| {
+        |ui| {
+            let ctx = &ui.ctx().clone();
             ide.each_builtin(|plugin, ide| plugin.update(ctx, ide));
-            ide.toolbar(ctx);
-            ide.status_bar(ctx);
-            ide.stripe(ctx, Dock::Left);
-            ide.stripe(ctx, Dock::Right);
-            ide.left_panel(ctx);
-            ide.right_panel(ctx);
-            ide.bottom_panel(ctx);
-            ide.editor(ctx);
+            ide.toolbar(ui);
+            ide.status_bar(ui);
+            ide.stripe(ui, Dock::Left);
+            ide.stripe(ui, Dock::Right);
+            ide.left_panel(ui);
+            ide.right_panel(ui);
+            ide.bottom_panel(ui);
+            ide.editor(ui);
             ide.dialogs(ctx);
             ide.log_status();
             ide.balloons(ctx);
         },
     );
+    // Its textures are not uploaded anywhere: dropped on purpose.
+    output.textures_delta.clear();
     assert!(
         !ctx.tessellate(output.shapes, output.pixels_per_point)
             .is_empty()
@@ -688,15 +694,18 @@ fn search_everywhere_finds_project_files() {
     ide.palette_query = "cargo.tom".into();
     // The files are listed in the background: the popup does not wait for them.
     let started = std::time::Instant::now();
+    // Matches of the text in the files may come first: wait for the file itself.
+    let found = |hits: &[Hit]| {
+        hits.iter()
+            .any(|h| matches!(&h.target, Target::File(p) if p.ends_with("Cargo.toml")))
+    };
     let mut hits = ide.palette_hits();
-    while hits.is_empty() && started.elapsed() < std::time::Duration::from_secs(20) {
+    // Under the load of the whole suite, listing the files may take long.
+    while !found(&hits) && started.elapsed() < std::time::Duration::from_secs(60) {
         std::thread::sleep(std::time::Duration::from_millis(20));
         hits = ide.palette_hits();
     }
-    assert!(
-        hits.iter()
-            .any(|h| matches!(&h.target, Target::File(p) if p.ends_with("Cargo.toml")))
-    );
+    assert!(found(&hits));
 }
 
 #[test]
@@ -901,7 +910,7 @@ fn shift_f6_then_enter_renames_the_name_at_the_caret() {
     step(&mut ide, vec![], Modifiers::NONE);
     assert_eq!(
         ctx.memory(|m| m.focused()),
-        Some(egui::Id::new("rename_field"))
+        Some(egui::Id::unique("rename_field"))
     );
     step(
         &mut ide,
@@ -989,36 +998,40 @@ fn the_editor_draws_with_a_split_and_several_carets() {
     let ctx = egui::Context::default();
     ide.apply_theme(&ctx);
     let frame = |ide: &mut Ide| {
-        let _ = ctx.run(
+        ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1200.0, 800.0))),
                 ..Default::default()
             },
-            |ctx| ide.editor(ctx),
-        );
+            |ui| ide.editor(ui),
+        )
+        .drop_without_applying_deltas();
     };
+    let groups = |ide: &Ide| ide.editor_layout.leaves().len();
     // The same file twice.
     ide.active = 0;
     ide.split_to(false);
-    assert!(ide.split.is_some());
+    assert_eq!(groups(&ide), 2);
     frame(&mut ide);
     frame(&mut ide);
-    // Under the first one.
+    // Another split, under the main group: three groups.
     ide.split_to(true);
-    assert!(ide.split.as_ref().is_some_and(|p| p.down));
+    assert_eq!(groups(&ide), 3);
     frame(&mut ide);
     frame(&mut ide);
-    // The second editor on another file.
+    // The main group on another file, the others keep theirs.
     ide.active = 1;
     frame(&mut ide);
-    assert_eq!(ide.split_other(), Some(0));
+    let shown = ide.documents[0].path.clone().unwrap();
+    assert!(ide.groups.iter().all(|g| g.tabs[0].path == shown));
     ide.documents[1].view.select(0, 0);
     frame(&mut ide);
-    // Closing the file closes the split.
+    // Closing the file closes its groups.
     ide.documents.remove(0);
     ide.active = 0;
     frame(&mut ide);
-    assert!(ide.split.is_none());
+    assert_eq!(groups(&ide), 1);
+    assert!(ide.groups.is_empty());
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -1063,18 +1076,19 @@ fn plugins_say_what_is_ignored_and_the_tree_can_leave_it_out() {
     let shown = |ide: &mut Ide| -> Vec<String> {
         ide.tree.clear();
         ide.row_rects.clear();
-        let _ = ctx.run(
+        ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(600.0, 600.0))),
                 ..Default::default()
             },
-            |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     let root = ide.root.clone();
                     ide.tree_ui(ui, &root, 0);
                 });
             },
-        );
+        )
+        .drop_without_applying_deltas();
         ide.row_rects
             .iter()
             .map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
@@ -1110,4 +1124,66 @@ fn a_window_does_not_put_back_what_another_changed() {
         serde_json::json!(["/b", "/a"]),
         "what this window changed is written"
     );
+}
+
+/// The files of the project are read in the background: a language left to the IDE is on until
+/// they are known, then follows them.
+#[test]
+fn languages_follow_the_files_read_in_the_background() {
+    let dir = temp_project("languages-follow");
+    let mut ide = ide_in(dir.clone());
+    // A reading started when the IDE opened could be done already on a fast machine: this
+    // test starts from a project whose files are not known.
+    ide.extensions_job = None;
+    ide.load_project_plugins(true);
+    assert!(ide.auto_plugins.contains("rust"));
+    assert!(ide.builtin_enabled("rust"), "on until the project is read");
+    let follow = |ide: &mut Ide| {
+        ide.project_extensions = None;
+        ide.wait_extensions();
+        ide.auto_checked = Instant::now().checked_sub(Duration::from_secs(5)).unwrap();
+        ide.follow_auto_plugins();
+    };
+    follow(&mut ide);
+    assert!(!ide.builtin_enabled("rust"), "no Rust file in the project");
+    fs::write(dir.join("main.rs"), "fn main() {}").unwrap();
+    follow(&mut ide);
+    assert!(ide.builtin_enabled("rust"), "a Rust file appeared");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Ctrl+Shift+F is Find in Files: the search of the project, not the search of the file that
+/// Ctrl+F opens (egui takes Ctrl+Shift+F for Ctrl+F when nothing more precise took it first).
+#[test]
+fn ctrl_shift_f_opens_find_in_files() {
+    use egui::{Event, Key, Modifiers};
+    let mut ide = ide();
+    let ctx = egui::Context::default();
+    ide.apply_theme(&ctx);
+    let press = |ide: &mut Ide, modifiers: Modifiers| {
+        ctx.run_pass(
+            egui::RawInput {
+                events: vec![
+                    Event::ModifiersChanged(modifiers),
+                    Event::Key {
+                        key: Key::F,
+                        physical_key: Some(Key::F),
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                    },
+                ],
+                ..Default::default()
+            },
+            |ctx| ide.shortcuts(ctx),
+        )
+        .drop_without_applying_deltas();
+    };
+    press(&mut ide, Modifiers::COMMAND | Modifiers::SHIFT);
+    assert_eq!(ide.bottom_tool.map(|t| t.id), Some("search.results"));
+    assert!(!ide.find.open, "not the search of the file");
+    ide.bottom_tool = None;
+    press(&mut ide, Modifiers::COMMAND);
+    assert!(ide.find.open, "Ctrl+F is still the search of the file");
+    assert!(ide.bottom_tool.is_none());
 }

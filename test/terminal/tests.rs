@@ -1,6 +1,6 @@
 #[test]
 fn the_screen_scrolls_back_through_the_history() {
-    let mut parser = vt100::Parser::new(10, 40, 1000);
+    let mut parser = vt100::Parser::new(cells(10), cells(40), 1000);
     for i in 0..100 {
         parser.process(format!("ligne {i}\r\n").as_bytes());
     }
@@ -16,7 +16,7 @@ fn the_screen_scrolls_back_through_the_history() {
 use super::*;
 #[test]
 fn ansi_screen_handles_carriage_return_and_escape_sequences() {
-    let mut parser = vt100::Parser::new(24, 80, 100);
+    let mut parser = vt100::Parser::new(cells(24), cells(80), 100);
     parser.process(b"old\r\x1b[2K\x1b[32mready\x1b[0m\r\n");
     assert_eq!(parser.screen().contents(), "ready");
 }
@@ -157,22 +157,24 @@ fn a_mouse_selection_starts_where_the_button_went_down() {
     let mut frame = |term: &mut Terminal, events: Vec<Event>| {
         time += 0.05;
         let mut rect = Rect::NOTHING;
-        let output = ctx.run(
+        let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0))),
                 time: Some(time),
                 events,
                 ..Default::default()
             },
-            |ctx| {
+            |ui| {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
-                    .show(ctx, |ui| {
+                    .show(ui, |ui| {
                         rect =
                             crate::terminal_ui::show(ui, term, &mut selection, &theme, &root).rect;
                     });
             },
         );
+        // Its textures are not uploaded anywhere: dropped on purpose.
+        output.textures_delta.clear();
         (rect, output.platform_output.commands)
     };
     let (rect, _) = frame(&mut term, vec![]);
@@ -210,7 +212,7 @@ fn a_mouse_selection_starts_where_the_button_went_down() {
 #[test]
 fn the_wheel_goes_to_a_program_that_took_the_screen() {
     use crate::terminal_ui::wheel_bytes;
-    let mut parser = vt100::Parser::new(24, 80, 100);
+    let mut parser = vt100::Parser::new(cells(24), cells(80), 100);
     // A pager: the alternate screen, no mouse, the arrows of the cursor mode.
     parser.process(b"[?1049h");
     assert_eq!(wheel_bytes(parser.screen(), true, 2, (0, 0)), b"[A[A");
@@ -237,7 +239,7 @@ fn the_wheel_goes_to_a_program_that_took_the_screen() {
 /// A full-screen AI copies its own selection with OSC 52: the text is kept for the clipboard.
 #[test]
 fn a_program_copies_to_the_clipboard() {
-    let mut parser = vt100::Parser::new_with_callbacks(4, 40, 0, Requests::default());
+    let mut parser = vt100::Parser::new_with_callbacks(cells(4), cells(40), 0, Requests::default());
     parser.process(b"\x1b]52;c;aMOobGxv\x07");
     assert_eq!(
         parser.callbacks_mut().copied.take().as_deref(),

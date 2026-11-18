@@ -14,6 +14,7 @@ use std::{
 };
 
 mod html;
+pub mod remote_svg;
 
 #[derive(Default)]
 struct View {
@@ -136,6 +137,11 @@ impl BuiltinPlugin for MarkdownPlugin {
                     style
                         .text_styles
                         .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
+                    // The font of bold text and of the titles (see vendor/README.md): the
+                    // viewer alone only makes them a little brighter.
+                    style
+                        .text_styles
+                        .insert(egui::TextStyle::Name("strong".into()), ui::semibold(14.0));
                     style.spacing.item_spacing.y = 8.0;
                     let max_width = (width - 80.0).max(100.0);
                     let base = base_uri(path);

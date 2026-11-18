@@ -115,8 +115,13 @@ fn object<'a>(value: &'a mut Value, key: &str) -> Result<&'a mut Map<String, Val
 /// Whether the project's configuration for `agent` declares the server (for Codex: at the
 /// address `url` of the running one).
 pub fn is_connected(agent: Agent, root: &Path, url: Option<&str>) -> bool {
+    declared(agent, &agent.config(root), url)
+}
+
+/// Whether the file `config` of `agent` declares the server.
+fn declared(agent: Agent, config: &Path, url: Option<&str>) -> bool {
     if agent == Agent::Codex {
-        let doc = fs::read_to_string(agent.config(root))
+        let doc = fs::read_to_string(config)
             .ok()
             .and_then(|t| t.parse::<toml_edit::DocumentMut>().ok());
         let found = doc
@@ -124,7 +129,7 @@ pub fn is_connected(agent: Agent, root: &Path, url: Option<&str>) -> bool {
             .and_then(|d| d.get("mcp_servers")?.get(SERVER)?.get("url")?.as_str());
         return found.is_some() && found == url;
     }
-    read_json(&agent.config(root)).is_ok_and(|v| v["mcpServers"].get(SERVER).is_some())
+    read_json(config).is_ok_and(|v| v["mcpServers"].get(SERVER).is_some())
 }
 
 /// Declares the server in `.codex/config.toml`, keeping the rest of the file, comments included.
@@ -202,6 +207,101 @@ pub fn connect(agent: Agent, root: &Path, url: Option<&str>) -> Result<Vec<PathB
         written.push(path);
     }
     Ok(written)
+}
+
+// ---- For every project ------------------------------------------------------------------
+
+impl Agent {
+    /// The file of the user that declares the MCP servers of every project, in the home
+    /// folder `home`.
+    fn user_config(self, home: &Path) -> PathBuf {
+        match self {
+            Agent::Claude => home.join(".claude.json"),
+            Agent::Gemini => home.join(".gemini").join("settings.json"),
+            Agent::Codex => home.join(".codex").join("config.toml"),
+        }
+    }
+}
+
+/// The home folder of the user an AI started in the project `root` runs as: the one inside the
+/// distribution for a project of WSL, where the AI reads its configuration.
+pub fn home(root: &Path) -> Option<PathBuf> {
+    match crate::wsl::parse(root) {
+        Some(wsl) => wsl_home(&wsl.distro),
+        None => std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+            .filter(|home| !home.is_empty())
+            .map(PathBuf::from),
+    }
+}
+
+/// The home folder of the default user of a WSL distribution, as a Windows path. Asked to the
+/// distribution once.
+fn wsl_home(distro: &str) -> Option<PathBuf> {
+    use std::{collections::BTreeMap, sync::Mutex};
+    static HOMES: Mutex<BTreeMap<String, PathBuf>> = Mutex::new(BTreeMap::new());
+    let mut homes = HOMES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(home) = homes.get(distro) {
+        return Some(home.clone());
+    }
+    let mut command = std::process::Command::new("wsl.exe");
+    command
+        .args(["-d", distro, "--exec", "sh", "-c", "printf %s \"$HOME\""])
+        .current_dir(std::env::temp_dir())
+        .stdin(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW: no console flashes over the IDE.
+        command.creation_flags(0x0800_0000);
+    }
+    let output = command.output().ok().filter(|o| o.status.success())?;
+    let linux = String::from_utf8(output.stdout).ok()?;
+    let linux = linux.trim();
+    if !linux.starts_with('/') {
+        return None;
+    }
+    let home = crate::wsl::to_windows(distro, linux);
+    homes.insert(distro.to_string(), home.clone());
+    Some(home)
+}
+
+/// Whether the configuration of the user (in the home folder `home`) declares the server for
+/// `agent`, in every project.
+pub fn is_connected_user(agent: Agent, home: &Path, url: Option<&str>) -> bool {
+    declared(agent, &agent.user_config(home), url)
+}
+
+/// Whether `agent` finds the server in the project `root`: declared by the project, or by the
+/// user for every project.
+pub fn finds_server(agent: Agent, root: &Path, url: Option<&str>) -> bool {
+    is_connected(agent, root, url) || home(root).is_some_and(|h| is_connected_user(agent, &h, url))
+}
+
+/// Writes `value` next to `path`, then puts it in its place: the file of the user holds more
+/// than the servers (Claude Code keeps its own state there) and must never be left half written.
+fn replace_json(path: &Path, value: &Value) -> Result<(), String> {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".atelier-tmp");
+    let draft = path.with_file_name(name);
+    write_json(&draft, value)?;
+    fs::rename(&draft, path).map_err(|e| {
+        let _ = fs::remove_file(&draft);
+        format!("{} : {e}", path.display())
+    })
+}
+
+/// Declares the server in the configuration of the user, for every project: nothing is written
+/// in the projects. The file never holds the secret, as in a project. The file written.
+pub fn connect_user(agent: Agent, home: &Path, url: Option<&str>) -> Result<PathBuf, String> {
+    let config = agent.user_config(home);
+    if agent == Agent::Codex {
+        connect_codex(&config, url.ok_or(tr!("mcp.mcp_server_not_started"))?)?;
+        return Ok(config);
+    }
+    let mut file = read_json(&config)?;
+    object(&mut file, "mcpServers")?.insert(SERVER.into(), agent.entry());
+    replace_json(&config, &file)?;
+    Ok(config)
 }
 
 #[cfg(test)]

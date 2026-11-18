@@ -10,6 +10,7 @@
 pub mod agents;
 mod commits;
 mod pr;
+mod quality;
 mod rework;
 mod server;
 mod sessions;
@@ -389,7 +390,7 @@ impl McpPlugin {
         let ctx = ctx.clone();
         self.usage.refresh(
             &root,
-            |agent| agents::is_connected(agent, &root, address.as_deref()),
+            |agent| agents::finds_server(agent, &root, address.as_deref()),
             move || ctx.request_repaint(),
         );
     }
@@ -610,6 +611,52 @@ fn limit_row(ui: &mut egui::Ui, limit: &usage::Limit) {
     });
 }
 
+/// The text of a quality run in the status bar: the gate, and the mutants once they run.
+fn quality_label(run: &quality::Progress, paused: bool) -> String {
+    let gate = if run.gate.is_empty() {
+        &run.tool
+    } else {
+        &run.gate
+    };
+    let count = if run.total > 0 {
+        format!(" {}/{}", run.done, run.total)
+    } else {
+        String::new()
+    };
+    if paused {
+        trf!("mcp.quality_paused", gate = gate, count = count)
+    } else {
+        format!("{gate}{count}…")
+    }
+}
+
+/// A quality run, at the bottom right: its icon, its progress, and the button that pauses or
+/// resumes it (right to left, as the status bar lays out).
+fn quality_status(ui: &mut egui::Ui, run: &quality::Progress) {
+    let paused = quality::paused();
+    let (icon, tooltip) = if paused {
+        ("run", tr!("mcp.quality_resume"))
+    } else {
+        ("mcp/icons/pause", tr!("mcp.quality_pause"))
+    };
+    if ui::icon_button(ui, icon, tooltip).clicked() {
+        quality::set_paused(!paused);
+    }
+    let details = trf!(
+        "mcp.quality_running",
+        tool = run.tool,
+        gate = run.gate,
+        phase = run.phase,
+        elapsed = quality::fmt_duration(run.elapsed())
+    );
+    ui::status_text(ui, &quality_label(run, paused)).on_hover_text(&details);
+    ui.add(ui::icon(ui, "mcp/icons/quality"))
+        .on_hover_text(details);
+    ui.add_space(6.0);
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(500));
+}
+
 impl BuiltinPlugin for McpPlugin {
     fn id(&self) -> &'static str {
         "mcp"
@@ -698,6 +745,9 @@ impl BuiltinPlugin for McpPlugin {
                 served = self.served
             ));
         }
+        if let Some(run) = quality::current() {
+            quality_status(ui, &run);
+        }
     }
 
     fn commands(&self) -> Vec<Command> {
@@ -705,6 +755,15 @@ impl BuiltinPlugin for McpPlugin {
             ("mcp.claude", tr!("mcp.mcp_connect_claude_code_project")),
             ("mcp.gemini", tr!("mcp.mcp_connect_gemini_cli_project")),
             ("mcp.codex", tr!("mcp.mcp_connect_codex_project")),
+            (
+                "mcp.claude.user",
+                tr!("mcp.mcp_connect_claude_code_everywhere"),
+            ),
+            (
+                "mcp.gemini.user",
+                tr!("mcp.mcp_connect_gemini_cli_everywhere"),
+            ),
+            ("mcp.codex.user", tr!("mcp.mcp_connect_codex_everywhere")),
             ("mcp.status", tr!("mcp.mcp_show_server_address")),
         ]
         .into_iter()
@@ -716,6 +775,11 @@ impl BuiltinPlugin for McpPlugin {
     }
 
     fn run_command(&mut self, id: &str, host: &mut dyn Host) {
+        // `.user`: for every project, in the configuration of the user.
+        let (id, everywhere) = match id.strip_suffix(".user") {
+            Some(id) => (id, true),
+            None => (id, false),
+        };
         let agent = match id {
             "mcp.claude" => agents::Agent::Claude,
             "mcp.gemini" => agents::Agent::Gemini,
@@ -735,7 +799,16 @@ impl BuiltinPlugin for McpPlugin {
                 return;
             }
         };
-        match agents::connect(agent, host.root(), self.address().as_deref()) {
+        let address = self.address();
+        let written = if everywhere {
+            agents::home(host.root())
+                .ok_or_else(|| tr!("mcp.home_folder_not_found").to_string())
+                .and_then(|home| agents::connect_user(agent, &home, address.as_deref()))
+                .map(|file| vec![file])
+        } else {
+            agents::connect(agent, host.root(), address.as_deref())
+        };
+        match written {
             Ok(files) => {
                 let names: Vec<String> = files
                     .iter()
