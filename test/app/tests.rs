@@ -230,21 +230,23 @@ fn frame_mod(
     events: Vec<egui::Event>,
     modifiers: egui::Modifiers,
 ) {
-    let _ = ctx.run(
+    ctx.run_ui(
         egui::RawInput {
-            modifiers,
             screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1440.0, 920.0))),
             time: Some(time),
-            events,
+            // The keys held come with the events.
+            events: [vec![egui::Event::ModifiersChanged(modifiers)], events].concat(),
             ..Default::default()
         },
-        |ctx| {
+        |ui| {
+            let ctx = &ui.ctx().clone();
             ide.track_focus(ctx);
-            ide.left_panel(ctx);
-            ide.editor(ctx);
+            ide.left_panel(ui);
+            ide.editor(ui);
             ide.dialogs(ctx);
         },
-    );
+    )
+    .drop_without_applying_deltas();
 }
 
 #[test]
@@ -540,26 +542,29 @@ fn dragging_a_file_onto_a_folder_moves_it() {
 }
 
 fn frame(ctx: &egui::Context, ide: &mut Ide) {
-    let output = ctx.run(
+    let mut output = ctx.run_ui(
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1440.0, 920.0))),
             ..Default::default()
         },
-        |ctx| {
+        |ui| {
+            let ctx = &ui.ctx().clone();
             ide.each_builtin(|plugin, ide| plugin.update(ctx, ide));
-            ide.toolbar(ctx);
-            ide.status_bar(ctx);
-            ide.stripe(ctx, Dock::Left);
-            ide.stripe(ctx, Dock::Right);
-            ide.left_panel(ctx);
-            ide.right_panel(ctx);
-            ide.bottom_panel(ctx);
-            ide.editor(ctx);
+            ide.toolbar(ui);
+            ide.status_bar(ui);
+            ide.stripe(ui, Dock::Left);
+            ide.stripe(ui, Dock::Right);
+            ide.left_panel(ui);
+            ide.right_panel(ui);
+            ide.bottom_panel(ui);
+            ide.editor(ui);
             ide.dialogs(ctx);
             ide.log_status();
             ide.balloons(ctx);
         },
     );
+    // Its textures are not uploaded anywhere: dropped on purpose.
+    output.textures_delta.clear();
     assert!(
         !ctx.tessellate(output.shapes, output.pixels_per_point)
             .is_empty()
@@ -905,7 +910,7 @@ fn shift_f6_then_enter_renames_the_name_at_the_caret() {
     step(&mut ide, vec![], Modifiers::NONE);
     assert_eq!(
         ctx.memory(|m| m.focused()),
-        Some(egui::Id::new("rename_field"))
+        Some(egui::Id::unique("rename_field"))
     );
     step(
         &mut ide,
@@ -993,13 +998,14 @@ fn the_editor_draws_with_a_split_and_several_carets() {
     let ctx = egui::Context::default();
     ide.apply_theme(&ctx);
     let frame = |ide: &mut Ide| {
-        let _ = ctx.run(
+        ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1200.0, 800.0))),
                 ..Default::default()
             },
-            |ctx| ide.editor(ctx),
-        );
+            |ui| ide.editor(ui),
+        )
+        .drop_without_applying_deltas();
     };
     let groups = |ide: &Ide| ide.editor_layout.leaves().len();
     // The same file twice.
@@ -1070,18 +1076,19 @@ fn plugins_say_what_is_ignored_and_the_tree_can_leave_it_out() {
     let shown = |ide: &mut Ide| -> Vec<String> {
         ide.tree.clear();
         ide.row_rects.clear();
-        let _ = ctx.run(
+        ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(600.0, 600.0))),
                 ..Default::default()
             },
-            |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     let root = ide.root.clone();
                     ide.tree_ui(ui, &root, 0);
                 });
             },
-        );
+        )
+        .drop_without_applying_deltas();
         ide.row_rects
             .iter()
             .map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
@@ -1151,20 +1158,23 @@ fn ctrl_shift_f_opens_find_in_files() {
     let ctx = egui::Context::default();
     ide.apply_theme(&ctx);
     let press = |ide: &mut Ide, modifiers: Modifiers| {
-        let _ = ctx.run(
+        ctx.run_pass(
             egui::RawInput {
-                modifiers,
-                events: vec![Event::Key {
-                    key: Key::F,
-                    physical_key: Some(Key::F),
-                    pressed: true,
-                    repeat: false,
-                    modifiers,
-                }],
+                events: vec![
+                    Event::ModifiersChanged(modifiers),
+                    Event::Key {
+                        key: Key::F,
+                        physical_key: Some(Key::F),
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                    },
+                ],
                 ..Default::default()
             },
             |ctx| ide.shortcuts(ctx),
-        );
+        )
+        .drop_without_applying_deltas();
     };
     press(&mut ide, Modifiers::COMMAND | Modifiers::SHIFT);
     assert_eq!(ide.bottom_tool.map(|t| t.id), Some("search.results"));

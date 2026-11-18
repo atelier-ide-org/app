@@ -127,7 +127,8 @@ impl eframe::App for Splash {
         egui::Rgba::TRANSPARENT.to_array()
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = &ui.ctx().clone();
         let step = self.progress.lock().unwrap().clone();
         // Once the IDE is started, the window fades out, then closes: already invisible, it does
         // not show the animation Windows plays when a window closes.
@@ -157,10 +158,10 @@ impl eframe::App for Splash {
                 spread: 0,
                 color: Color32::from_black_alpha((110.0 * opacity) as u8),
             });
-        egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
+        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             ui.set_opacity(opacity);
             // No title bar: the whole window moves it.
-            let whole = ui.interact(ui.max_rect(), ui.id().with("drag"), Sense::drag());
+            let whole = ui.interact(ui.max_rect(), ui.scope_id().with("drag"), Sense::drag());
             if whole.drag_started() {
                 ctx.send_viewport_cmd(ViewportCommand::StartDrag);
             }

@@ -173,7 +173,7 @@ pub fn theme_by_index(index: usize) -> Theme {
 }
 
 fn theme_id() -> egui::Id {
-    egui::Id::new("atelier_theme")
+    egui::Id::unique("atelier_theme")
 }
 
 /// The theme the interface is drawn with.
@@ -209,7 +209,7 @@ impl Default for Fonts {
 }
 
 fn fonts_id() -> egui::Id {
-    egui::Id::new("atelier_fonts")
+    egui::Id::unique("atelier_fonts")
 }
 
 /// Uses these fonts from now on (nothing to do when they already are).
@@ -486,7 +486,7 @@ pub fn install(ctx: &egui::Context, t: Theme, editor_font_size: f32) {
         widget.corner_radius = radius;
     }
     ctx.set_visuals(v);
-    ctx.style_mut(|style| {
+    ctx.global_style_mut(|style| {
         use egui::TextStyle;
         style.text_styles = [
             (TextStyle::Small, FontId::proportional(11.5)),
@@ -819,8 +819,8 @@ pub fn search_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> R
     let (rect, _) = ui.allocate_exact_size(vec2(width, 28.0), Sense::hover());
     let edit = egui::TextEdit::singleline(text)
         .hint_text(hint)
-        .frame(false)
-        .vertical_align(egui::Align::Center)
+        .frame(egui::Frame::NONE)
+        .align(egui::Align2::LEFT_CENTER)
         .margin(egui::Margin {
             left: 28,
             right: 8,

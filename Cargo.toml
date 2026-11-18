@@ -13,14 +13,26 @@ repository = "https://github.com/atelier-ide-org/app"
 default-run = "atelier-ide"
 
 [dependencies]
-eframe = { version = "0.33", features = ["persistence"] }
+# The glow renderer, not wgpu (the default since 0.34): the native plugins paint through
+# egui_glow callbacks.
+eframe = { version = "0.37", default-features = false, features = [
+    "accesskit",
+    "clipboard",
+    "default_fonts",
+    "glow",
+    "links",
+    "persistence",
+    "system_fonts",
+    "wayland",
+    "x11",
+] }
 # `http`: the pictures of a Markdown document that are on the web (badges, screenshots).
-egui_extras = { version = "0.33", features = ["syntect", "svg", "svg_text", "image", "file", "http"] }
+egui_extras = { version = "0.37", features = ["syntect", "svg", "svg_text", "image", "file", "http"] }
 # Draws the SVG of a diagram (the renderer gives text, not a tree of its own resvg) and the badges
 # of a README, with the fonts of the system.
 resvg = { version = "0.49", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
 mermaid-rs-renderer = { version = "0.3", default-features = false, features = ["png"] }
-egui_commonmark = { version = "0.22", features = ["better_syntax_highlighting", "svg"] }
+egui_commonmark = { version = "0.26", features = ["better_syntax_highlighting", "svg"] }
 # The parser of egui_commonmark: where the HTML of a Markdown document is.
 pulldown-cmark = { version = "0.13", default-features = false }
 # The name of an installed font and whether it is monospaced.

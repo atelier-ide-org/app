@@ -126,7 +126,7 @@ impl Ide {
         };
         let t = ui::theme(ctx);
         let mut browse = false;
-        let modal = egui::Modal::new(egui::Id::new("new_project")).show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::unique("new_project")).show(ctx, |ui| {
             ui.set_width(480.0);
             ui::dialog_title(ui, tr!("projects.new_title"));
             egui::Grid::new("new_project_grid")
@@ -193,16 +193,17 @@ impl Ide {
     }
 
     /// The window started without a project: its own title bar and the Projects page.
-    pub(super) fn start_screen_ui(&mut self, ctx: &egui::Context) {
+    pub(super) fn start_screen_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         let t = self.theme(ctx);
-        egui::TopBottomPanel::top("start_title")
-            .exact_height(TITLE_HEIGHT)
+        egui::Panel::top("start_title")
+            .exact_size(TITLE_HEIGHT)
             .frame(egui::Frame::new().fill(t.frame))
             .show_separator_line(false)
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 let bar = ui.interact(
                     ui.max_rect(),
-                    egui::Id::new("start_title_bar"),
+                    egui::Id::unique("start_title_bar"),
                     Sense::click_and_drag(),
                 );
                 let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
@@ -226,7 +227,7 @@ impl Ide {
                     .fill(t.island)
                     .inner_margin(Margin::symmetric(28, 20)),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.label(RichText::new(tr!("projects.welcome")).font(ui::semibold(20.0)));
                 ui.add_space(14.0);
                 let width = ui.available_width();
@@ -247,7 +248,7 @@ impl Ide {
         );
         let mut action = None;
         let mut close = false;
-        let modal = egui::Modal::new(egui::Id::new("projects")).show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::unique("projects")).show(ctx, |ui| {
             ui.set_width(size.x);
             ui.set_height(size.y);
             self.projects_body(ui, size.x, &mut action, Some(&mut close));

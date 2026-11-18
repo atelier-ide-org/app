@@ -157,22 +157,24 @@ fn a_mouse_selection_starts_where_the_button_went_down() {
     let mut frame = |term: &mut Terminal, events: Vec<Event>| {
         time += 0.05;
         let mut rect = Rect::NOTHING;
-        let output = ctx.run(
+        let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0))),
                 time: Some(time),
                 events,
                 ..Default::default()
             },
-            |ctx| {
+            |ui| {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
-                    .show(ctx, |ui| {
+                    .show(ui, |ui| {
                         rect =
                             crate::terminal_ui::show(ui, term, &mut selection, &theme, &root).rect;
                     });
             },
         );
+        // Its textures are not uploaded anywhere: dropped on purpose.
+        output.textures_delta.clear();
         (rect, output.platform_output.commands)
     };
     let (rect, _) = frame(&mut term, vec![]);

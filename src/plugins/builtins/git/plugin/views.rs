@@ -666,7 +666,7 @@ impl GitPlugin {
         // Some(None) hides the branch actions, Some(Some) shows them for another branch.
         let mut sub: Option<Option<(Branch, Pos2)>> = None;
         const WIDTH: f32 = 360.0;
-        let main = egui::Area::new(Id::new("git_branch_popup"))
+        let main = egui::Area::new(Id::unique("git_branch_popup"))
             .order(egui::Order::Foreground)
             .fixed_pos(anchor)
             .pivot(pivot)
@@ -811,7 +811,7 @@ impl GitPlugin {
         }
         let mut sub_rect = None;
         if !close && let Some((branch, at)) = self.branch_sub.clone() {
-            let shown = egui::Area::new(Id::new("git_branch_actions"))
+            let shown = egui::Area::new(Id::unique("git_branch_actions"))
                 .order(egui::Order::Foreground)
                 .fixed_pos(at)
                 .show(ctx, |ui| {
@@ -1143,7 +1143,7 @@ impl GitPlugin {
                 });
         }
 
-        egui::TopBottomPanel::bottom("git_commit_box")
+        egui::Panel::bottom("git_commit_box")
             .frame(Frame::NONE.inner_margin(Margin {
                 left: 8,
                 right: 8,
@@ -1151,7 +1151,7 @@ impl GitPlugin {
                 bottom: 10,
             }))
             .show_separator_line(true)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if kit::checkbox(ui, &mut self.amend, tr!("git.amend_last_commit")).changed() {
                         self.toggle_amend();
@@ -1175,7 +1175,7 @@ impl GitPlugin {
                 let edit = ui.add(
                     TextEdit::multiline(&mut self.message)
                         .hint_text(tr!("git.commit_message"))
-                        .frame(false)
+                        .frame(egui::Frame::NONE)
                         .desired_rows(5)
                         .desired_width(f32::INFINITY)
                         .margin(Margin::symmetric(2, 6)),
@@ -1208,7 +1208,7 @@ impl GitPlugin {
 
         egui::CentralPanel::default()
             .frame(Frame::NONE)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| self.changes_tree(ui, &mut action));
@@ -1264,7 +1264,7 @@ impl GitPlugin {
             );
             if row_check(
                 ui,
-                Id::new(("git_group", title.0)),
+                Id::unique(("git_group", title.0)),
                 left + 22.0,
                 rect,
                 state,
@@ -1287,7 +1287,7 @@ impl GitPlugin {
                 let on = self.included(change);
                 let check = row_check(
                     ui,
-                    Id::new(("git_change", &change.path)),
+                    Id::unique(("git_change", &change.path)),
                     left + 42.0,
                     rect,
                     Some(on),
@@ -1476,11 +1476,11 @@ impl GitPlugin {
 
     fn console_view(&mut self, ui: &mut Ui) {
         let t = self.theme;
-        egui::SidePanel::left("git_console_tools")
-            .exact_width(34.0)
+        egui::Panel::left("git_console_tools")
+            .exact_size(34.0)
             .resizable(false)
             .frame(Frame::NONE.inner_margin(Margin::symmetric(4, 2)))
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 if kit::icon_button(ui, "delete", tr!("git.clear")).clicked()
                     && let Ok(mut console) = self.console.lock()
                 {
@@ -1489,7 +1489,7 @@ impl GitPlugin {
             });
         egui::CentralPanel::default()
             .frame(Frame::NONE.inner_margin(Margin::symmetric(8, 4)))
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 egui::ScrollArea::both()
                     .auto_shrink([false, false])
                     .stick_to_bottom(true)
@@ -1538,31 +1538,31 @@ impl GitPlugin {
         }
         let mut action = None;
         let full = ui.available_width();
-        egui::SidePanel::left("git_log_branches")
+        egui::Panel::left("git_log_branches")
             .resizable(true)
-            .default_width((full * 0.17).clamp(160.0, 260.0))
-            .width_range(120.0..=420.0)
+            .default_size((full * 0.17).clamp(160.0, 260.0))
+            .size_range(120.0..=420.0)
             .frame(Frame::NONE.inner_margin(Margin {
                 left: 0,
                 right: 4,
                 top: 0,
                 bottom: 0,
             }))
-            .show_inside(ui, |ui| self.branches_view(ui, host, &mut action));
-        egui::SidePanel::right("git_log_details")
+            .show(ui, |ui| self.branches_view(ui, host, &mut action));
+        egui::Panel::right("git_log_details")
             .resizable(true)
-            .default_width((full * 0.28).clamp(240.0, 420.0))
-            .width_range(200.0..=720.0)
+            .default_size((full * 0.28).clamp(240.0, 420.0))
+            .size_range(200.0..=720.0)
             .frame(Frame::NONE.inner_margin(Margin {
                 left: 4,
                 right: 0,
                 top: 0,
                 bottom: 0,
             }))
-            .show_inside(ui, |ui| self.details_view(ui, &mut action));
+            .show(ui, |ui| self.details_view(ui, &mut action));
         egui::CentralPanel::default()
             .frame(Frame::NONE)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 self.log_filters(ui);
                 if let Some(error) = &self.log.error {
                     ui.label(RichText::new(error).color(self.theme.error));
@@ -1930,17 +1930,17 @@ impl GitPlugin {
         };
         let commit = self.log.rows.iter().find(|c| &c.hash == hash);
         let full = ui.available_height();
-        egui::TopBottomPanel::bottom("git_log_meta")
+        egui::Panel::bottom("git_log_meta")
             .resizable(true)
-            .default_height(full * 0.5)
-            .height_range(60.0..=(full - 40.0).max(61.0))
+            .default_size(full * 0.5)
+            .size_range(60.0..=(full - 40.0).max(61.0))
             .frame(Frame::NONE.inner_margin(Margin {
                 left: 10,
                 right: 8,
                 top: 8,
                 bottom: 6,
             }))
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -1985,7 +1985,7 @@ impl GitPlugin {
             });
         egui::CentralPanel::default()
             .frame(Frame::NONE)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -2119,11 +2119,11 @@ impl GitPlugin {
         let Some(view) = &mut self.diff else { return };
         let mut open = true;
         egui::Window::new(&view.path)
-            .id(Id::new("git_diff"))
+            .id(Id::unique("git_diff"))
             .open(&mut open)
             .default_size([1100.0, 680.0])
             .collapsible(false)
-            .frame(Frame::window(&ctx.style()).inner_margin(Margin::symmetric(8, 6)))
+            .frame(Frame::window(&ctx.global_style()).inner_margin(Margin::symmetric(8, 6)))
             .show(ctx, |ui| {
                 let mut rebuild = false;
                 toolbar(ui, |ui| {
@@ -2278,11 +2278,11 @@ impl GitPlugin {
         let (mut apply, mut edit, mut cancel) = (false, false, false);
         let total = conflict::conflicts(&resolver.segments);
         egui::Window::new(trf!("git.merge_revisions", path = resolver.path))
-            .id(Id::new("git_resolver"))
+            .id(Id::unique("git_resolver"))
             .open(&mut open)
             .default_size([1000.0, 640.0])
             .collapsible(false)
-            .frame(Frame::window(&ctx.style()).inner_margin(Margin::same(10)))
+            .frame(Frame::window(&ctx.global_style()).inner_margin(Margin::same(10)))
             .show(ctx, |ui| {
                 let remaining = resolver
                     .segments
@@ -2338,10 +2338,10 @@ impl GitPlugin {
                         );
                     });
                 });
-                egui::TopBottomPanel::bottom("git_resolver_actions")
+                egui::Panel::bottom("git_resolver_actions")
                     .frame(Frame::NONE.inner_margin(Margin::symmetric(0, 6)))
                     .show_separator_line(false)
-                    .show_inside(ui, |ui| {
+                    .show(ui, |ui| {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             cancel = kit::button(ui, tr!("git.cancel")).clicked();
                             let label = if remaining == 0 {
@@ -2357,7 +2357,7 @@ impl GitPlugin {
                     });
                 egui::CentralPanel::default()
                     .frame(Frame::NONE)
-                    .show_inside(ui, |ui| {
+                    .show(ui, |ui| {
                         egui::ScrollArea::vertical()
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
@@ -2394,9 +2394,9 @@ impl GitPlugin {
         let mut cancel = false;
         let mut force = false;
         let mut remove_remote = None;
-        let modal = egui::Modal::new(Id::new("git_dialog"))
+        let modal = egui::Modal::new(Id::unique("git_dialog"))
             .frame(
-                Frame::popup(&ctx.style())
+                Frame::popup(&ctx.global_style())
                     .inner_margin(20)
                     .corner_radius(10),
             )
@@ -2714,7 +2714,7 @@ impl GitPlugin {
                                         );
                                         let r = ui.interact(
                                             button,
-                                            Id::new(("git_remote_remove", &remote.name)),
+                                            Id::unique(("git_remote_remove", &remote.name)),
                                             Sense::click(),
                                         );
                                         kit::paint_hover(ui, button, &r, false);

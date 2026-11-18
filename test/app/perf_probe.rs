@@ -29,24 +29,26 @@ fn probe_big_file() {
     ide.wait_loaded();
     for i in 0..4 {
         let t0 = Instant::now();
-        let output = ctx.run(
+        let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1440.0, 920.0))),
                 ..Default::default()
             },
-            |ctx| {
+            |ui| {
                 let t = Instant::now();
-                ide.status_bar(ctx);
+                ide.status_bar(ui);
                 let a = t.elapsed();
                 let t = Instant::now();
-                ide.left_panel(ctx);
+                ide.left_panel(ui);
                 let b = t.elapsed();
                 let t = Instant::now();
-                ide.editor(ctx);
+                ide.editor(ui);
                 let c = t.elapsed();
                 println!("  frame {i}: status {a:?} tree {b:?} editor {c:?}");
             },
         );
+        // Its textures are not uploaded anywhere: dropped on purpose.
+        output.textures_delta.clear();
         let t = Instant::now();
         let prims = ctx.tessellate(output.shapes, output.pixels_per_point);
         let verts: usize = prims
@@ -110,27 +112,31 @@ fn probe_big_json_scroll() {
             events.push(egui::Event::MouseWheel {
                 unit: egui::MouseWheelUnit::Point,
                 delta: vec2(0.0, -4000.0),
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Wheel,
                 modifiers: Default::default(),
             });
         }
         let t0 = Instant::now();
-        let output = ctx.run(
+        let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(screen),
                 events,
                 ..Default::default()
             },
-            |ctx| {
+            |ui| {
                 let t = Instant::now();
-                ide.status_bar(ctx);
+                ide.status_bar(ui);
                 let a = t.elapsed();
-                ide.left_panel(ctx);
+                ide.left_panel(ui);
                 let t = Instant::now();
-                ide.editor(ctx);
+                ide.editor(ui);
                 let c = t.elapsed();
                 print!("  status {a:?} editor {c:?} |");
             },
         );
+        // Its textures are not uploaded anywhere: dropped on purpose.
+        output.textures_delta.clear();
         let run = t0.elapsed();
         let t = Instant::now();
         let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
@@ -218,23 +224,25 @@ fn probe_tab_switch() {
     let frame = |ide: &mut Ide| {
         let t0 = Instant::now();
         let mut parts = (Default::default(), Default::default(), Default::default());
-        let output = ctx.run(
+        let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(screen),
                 ..Default::default()
             },
-            |ctx| {
+            |ui| {
                 let t = Instant::now();
-                ide.status_bar(ctx);
+                ide.status_bar(ui);
                 parts.0 = t.elapsed();
                 let t = Instant::now();
-                ide.left_panel(ctx);
+                ide.left_panel(ui);
                 parts.1 = t.elapsed();
                 let t = Instant::now();
-                ide.editor(ctx);
+                ide.editor(ui);
                 parts.2 = t.elapsed();
             },
         );
+        // Its textures are not uploaded anywhere: dropped on purpose.
+        output.textures_delta.clear();
         let t = Instant::now();
         let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
         (t0.elapsed(), parts, t.elapsed())

@@ -309,7 +309,7 @@ impl Ide {
         for divider in &dividers {
             let response = ui.interact(
                 divider.rect.expand(2.0),
-                egui::Id::new(("editor_divider", viewport, divider.path.clone())),
+                egui::Id::unique(("editor_divider", viewport, divider.path.clone())),
                 Sense::drag(),
             );
             let icon = if divider.stacked {
@@ -385,7 +385,7 @@ impl Ide {
             x += width + 2.0;
             let response = ui.interact(
                 tab,
-                egui::Id::new(("group_tab", id, i)),
+                egui::Id::unique(("group_tab", id, i)),
                 Sense::click_and_drag(),
             );
             if i == active {
@@ -415,7 +415,7 @@ impl Ide {
             );
             let close_response = ui.interact(
                 close_rect,
-                egui::Id::new(("group_tab_close", id, i)),
+                egui::Id::unique(("group_tab_close", id, i)),
                 Sense::click(),
             );
             if *dirty && !response.hovered() && !close_response.hovered() {
@@ -550,7 +550,7 @@ impl Ide {
         });
         let painter = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
-            egui::Id::new("group_drop"),
+            egui::Id::unique("group_drop"),
         ));
         if let Some((group, rect, side)) = target {
             // Dropped in its own group's middle, a tab stays where it is.
@@ -687,16 +687,17 @@ impl Ide {
                 builder = builder.with_position(position);
             }
             let mut close = false;
-            ctx.show_viewport_immediate(id, builder, |ctx, class| {
+            ctx.show_viewport_immediate(id, builder, |ui, class| {
+                let ctx = &ui.ctx().clone();
                 let draw = |ide: &mut Ide, ui: &mut egui::Ui| {
                     let rect = ui.max_rect();
                     ide.layout_ui(ui, rect, Some(w));
                 };
-                if class == egui::ViewportClass::Embedded {
+                if class == egui::ViewportClass::EmbeddedWindow {
                     // A backend without windows of its own: a window inside the main one.
                     let mut open = true;
                     egui::Window::new("Atelier IDE")
-                        .id(egui::Id::new(("editor_window", w)))
+                        .id(egui::Id::unique(("editor_window", w)))
                         .open(&mut open)
                         .default_size([700.0, 500.0])
                         .show(ctx, |ui| draw(self, ui));
@@ -704,7 +705,7 @@ impl Ide {
                 } else {
                     egui::CentralPanel::default()
                         .frame(egui::Frame::new().fill(t.island))
-                        .show(ctx, |ui| draw(self, ui));
+                        .show(ui, |ui| draw(self, ui));
                     self.group_drag_ui(ctx);
                     close |= ctx.input(|i| i.viewport().close_requested());
                 }

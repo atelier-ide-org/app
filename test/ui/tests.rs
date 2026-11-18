@@ -35,10 +35,11 @@ fn themes_install_and_fonts_resolve() {
         install(&ctx, theme_by_index(index), 14.0);
         assert_eq!(theme(&ctx), theme_by_index(index));
     }
-    let _ = ctx.run(Default::default(), |ctx| {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    ctx.run_ui(Default::default(), |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.label(RichText::new("Projet").font(semibold(13.0)));
             ui.monospace("fn main() {}");
         });
-    });
+    })
+    .drop_without_applying_deltas();
 }

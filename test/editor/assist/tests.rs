@@ -138,9 +138,10 @@ fn frame(state: &mut EditorState, service: &Service, doc: &DocRef, text: &str) {
         bookmarks: &[],
         spellcheck: false,
     };
-    let _ = ctx.run(Default::default(), |ctx| {
-        egui::CentralPanel::default().show(ctx, |ui| state.assist_frame(ui, text, &options));
-    });
+    ctx.run_ui(Default::default(), |ui| {
+        egui::CentralPanel::default().show(ui, |ui| state.assist_frame(ui, text, &options));
+    })
+    .drop_without_applying_deltas();
 }
 
 fn state_for(text: &str) -> EditorState {
@@ -666,10 +667,11 @@ fn click_frame(
         bookmarks: &[],
         spellcheck: false,
     };
-    let _ = ctx.run(Default::default(), |ctx| {
+    ctx.run_ui(Default::default(), |ui| {
         egui::CentralPanel::default()
-            .show(ctx, |ui| state.assist_goto_now(ui, text, &options, offset));
-    });
+            .show(ui, |ui| state.assist_goto_now(ui, text, &options, offset));
+    })
+    .drop_without_applying_deltas();
 }
 
 /// Ctrl+click goes to the declaration in the frame of the click: nothing is left for the next.

@@ -2157,18 +2157,19 @@ impl Ide {
 
     // ---- Title bar ----------------------------------------------------------------------
 
-    fn toolbar(&mut self, ctx: &egui::Context) {
+    fn toolbar(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         let t = self.theme(ctx);
-        egui::TopBottomPanel::top("toolbar")
-            .exact_height(TITLE_HEIGHT)
+        egui::Panel::top("toolbar")
+            .exact_size(TITLE_HEIGHT)
             .frame(egui::Frame::new().fill(t.frame))
             .show_separator_line(false)
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 let bar_rect = ui.max_rect();
                 // Empty areas of the bar move the window; widgets added afterwards take priority.
                 let bar = ui.interact(
                     bar_rect,
-                    egui::Id::new("title_bar"),
+                    egui::Id::unique("title_bar"),
                     Sense::click_and_drag(),
                 );
                 let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
@@ -2309,7 +2310,7 @@ impl Ide {
         };
         // The bar takes the whole width it is given: give it the width of its titles, measured
         // on the previous frame, so that the project widget and the run toolbar stay beside it.
-        let width_id = egui::Id::new("main_menu_width");
+        let width_id = egui::Id::unique("main_menu_width");
         let width = ctx
             .data(|d| d.get_temp::<f32>(width_id))
             .unwrap_or(ui.available_width())
@@ -2349,7 +2350,7 @@ impl Ide {
                 label,
                 egui::Atom::grow(),
                 egui::RichText::new(shortcut).weak(),
-                egui::Atom::custom(egui::Id::NULL, vec2(2.0, 0.0)),
+                egui::Atom::custom(egui::IdSalt::new("shortcut_gap"), vec2(2.0, 0.0)),
             ));
             ui.add(button).clicked()
         };
@@ -2651,7 +2652,7 @@ impl Ide {
                 vec2(16.0, 16.0),
             ),
         );
-        let popup = egui::Popup::menu(&response).id(egui::Id::new("project_menu"));
+        let popup = egui::Popup::menu(&response).id(egui::Id::unique("project_menu"));
         popup.show(|ui| {
             const WIDTH: f32 = 380.0;
             ui.set_width(WIDTH);
@@ -2805,7 +2806,7 @@ impl Ide {
         let label = self.run_label();
         let response = ui::icon_text_button(ui, None, &label, true);
         egui::Popup::menu(&response)
-            .id(egui::Id::new("run_menu"))
+            .id(egui::Id::unique("run_menu"))
             .show(|ui| {
                 ui.set_min_width(220.0);
                 if ui
@@ -2920,14 +2921,15 @@ impl Ide {
         }
     }
 
-    fn stripe(&mut self, ctx: &egui::Context, side: Dock) {
+    fn stripe(&mut self, ui: &mut egui::Ui, side: Dock) {
+        let ctx = &ui.ctx().clone();
         let t = self.theme(ctx);
         let panel = match side {
-            Dock::Right => egui::SidePanel::right("stripe_right"),
-            _ => egui::SidePanel::left("stripe_left"),
+            Dock::Right => egui::Panel::right("stripe_right"),
+            _ => egui::Panel::left("stripe_left"),
         };
         panel
-            .exact_width(STRIPE_WIDTH)
+            .exact_size(STRIPE_WIDTH)
             .resizable(false)
             .frame(
                 egui::Frame::new()
@@ -2935,7 +2937,7 @@ impl Ide {
                     .inner_margin(Margin::symmetric(5, 6)),
             )
             .show_separator_line(false)
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 let tools = self.all_tools();
                 let top: Vec<_> = tools
@@ -3153,26 +3155,27 @@ impl Ide {
 
     // ---- Project tool window ------------------------------------------------------------
 
-    fn left_panel(&mut self, ctx: &egui::Context) {
+    fn left_panel(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         if let Some(tool) = self.left_tool {
-            let response = egui::SidePanel::left("tool_left")
-                .default_width(340.0)
-                .width_range(220.0..=760.0)
+            let response = egui::Panel::left("tool_left")
+                .default_size(340.0)
+                .size_range(220.0..=760.0)
                 .frame(self.island(ctx))
                 .show_separator_line(false)
-                .show(ctx, |ui| self.tool_panel(ui, tool));
+                .show(ui, |ui| self.tool_panel(ui, tool));
             self.panel_focus(Some(tool.id), response.response.rect);
             return;
         }
         if !self.show_project {
             return;
         }
-        let response = egui::SidePanel::left("project")
-            .default_width(300.0)
-            .width_range(180.0..=600.0)
+        let response = egui::Panel::left("project")
+            .default_size(300.0)
+            .size_range(180.0..=600.0)
             .frame(self.island(ctx))
             .show_separator_line(false)
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 let hide = self.tool_header(ui, tr!("project"), |ide, ui| {
                     if ui::icon_button(ui, "collapseAll", tr!("collapse_all")).clicked() {
                         ide.expanded = BTreeSet::from([ide.root.clone()]);
@@ -3194,7 +3197,7 @@ impl Ide {
                         },
                     );
                     egui::Popup::menu(&graph)
-                        .id(egui::Id::new("graph_menu"))
+                        .id(egui::Id::unique("graph_menu"))
                         .show(|ui| ide.graph_menu(ui));
                 });
                 if hide {
@@ -3576,7 +3579,7 @@ impl Ide {
             let t = self.theme(ctx);
             ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Tooltip,
-                egui::Id::new("tree_drag"),
+                egui::Id::unique("tree_drag"),
             ))
             .text(
                 pointer + vec2(12.0, 12.0),
@@ -4057,7 +4060,7 @@ impl Ide {
         let mut keep = None;
         match dialog {
             TreeDialog::NewFolder(mut name) => {
-                let modal = egui::Modal::new(egui::Id::new("new_folder")).show(ctx, |ui| {
+                let modal = egui::Modal::new(egui::Id::unique("new_folder")).show(ctx, |ui| {
                     ui.set_width(420.0);
                     ui::dialog_title(ui, tr!("new_folder"));
                     ui.add(
@@ -4091,7 +4094,7 @@ impl Ide {
                 }
             }
             TreeDialog::Rename { path, mut name } => {
-                let modal = egui::Modal::new(egui::Id::new("rename")).show(ctx, |ui| {
+                let modal = egui::Modal::new(egui::Id::unique("rename")).show(ctx, |ui| {
                     ui.set_width(420.0);
                     ui::dialog_title(ui, tr!("rename"));
                     ui.add(egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY))
@@ -4115,7 +4118,7 @@ impl Ide {
                 }
             }
             TreeDialog::Delete(paths) => {
-                let modal = egui::Modal::new(egui::Id::new("delete")).show(ctx, |ui| {
+                let modal = egui::Modal::new(egui::Id::unique("delete")).show(ctx, |ui| {
                     ui.set_width(420.0);
                     ui::dialog_title(ui, tr!("delete"));
                     if let [path] = &paths[..] {
@@ -4339,19 +4342,20 @@ impl Ide {
 
     // ---- Bottom and right tool windows --------------------------------------------------
 
-    fn bottom_panel(&mut self, ctx: &egui::Context) {
+    fn bottom_panel(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         let tool = match self.bottom_tool {
             Some(tool) => Some(tool),
             None if self.show_terminal => None,
             None => return,
         };
-        let response = egui::TopBottomPanel::bottom("tool_bottom")
-            .default_height(300.0)
-            .height_range(140.0..=820.0)
+        let response = egui::Panel::bottom("tool_bottom")
+            .default_size(300.0)
+            .size_range(140.0..=820.0)
             .resizable(true)
             .frame(self.island(ctx))
             .show_separator_line(false)
-            .show(ctx, |ui| match tool {
+            .show(ui, |ui| match tool {
                 Some(tool) => self.tool_panel(ui, tool),
                 None => self.terminal_panel(ui),
             });
@@ -4390,7 +4394,7 @@ impl Ide {
             }
             let plus = ui::icon_button(ui, "add", tr!("new_terminal"));
             egui::Popup::menu(&plus)
-                .id(egui::Id::new("terminal_shells"))
+                .id(egui::Id::unique("terminal_shells"))
                 .show(|ui| {
                     ui::menu_begin(ui);
                     ui::menu_title(ui, tr!("new_terminal"));
@@ -4438,7 +4442,7 @@ impl Ide {
             let active = index == self.active_terminal;
             let response = ui.interact(
                 rect,
-                egui::Id::new(("terminal_tab", index)),
+                egui::Id::unique(("terminal_tab", index)),
                 Sense::click_and_drag(),
             );
             if response.dragged() && ui.input(|i| i.pointer.is_decidedly_dragging()) {
@@ -4480,7 +4484,7 @@ impl Ide {
             );
             let cross_response = ui.interact(
                 cross,
-                egui::Id::new(("terminal_close", index)),
+                egui::Id::unique(("terminal_close", index)),
                 Sense::click(),
             );
             if cross_response.hovered() {
@@ -4592,7 +4596,7 @@ impl Ide {
                         body.min.y += HEAD;
                         let response = ui.interact(
                             head,
-                            egui::Id::new(("pane_head", pane.id)),
+                            egui::Id::unique(("pane_head", pane.id)),
                             Sense::click_and_drag(),
                         );
                         ui.painter().rect_filled(
@@ -4725,7 +4729,7 @@ impl Ide {
                     let response = ui
                         .interact(
                             grab,
-                            egui::Id::new(("terminal_divider", index)),
+                            egui::Id::unique(("terminal_divider", index)),
                             Sense::drag(),
                         )
                         .on_hover_cursor(if divider.stacked {
@@ -4857,7 +4861,7 @@ impl Ide {
             if let Some(name) = name {
                 ctx.layer_painter(egui::LayerId::new(
                     egui::Order::Tooltip,
-                    egui::Id::new("terminal_drag"),
+                    egui::Id::unique("terminal_drag"),
                 ))
                 .text(
                     pointer + vec2(12.0, 12.0),
@@ -4985,26 +4989,27 @@ impl Ide {
         self.active_terminal = active;
     }
 
-    fn right_panel(&mut self, ctx: &egui::Context) {
+    fn right_panel(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         if let Some(tool) = self.right_tool {
-            let response = egui::SidePanel::right("tool_right")
-                .default_width(340.0)
-                .width_range(220.0..=760.0)
+            let response = egui::Panel::right("tool_right")
+                .default_size(340.0)
+                .size_range(220.0..=760.0)
                 .frame(self.island(ctx))
                 .show_separator_line(false)
-                .show(ctx, |ui| self.tool_panel(ui, tool));
+                .show(ui, |ui| self.tool_panel(ui, tool));
             self.panel_focus(Some(tool.id), response.response.rect);
             return;
         }
         if !self.show_notifications {
             return;
         }
-        let response = egui::SidePanel::right("notifications")
-            .default_width(340.0)
-            .width_range(240.0..=600.0)
+        let response = egui::Panel::right("notifications")
+            .default_size(340.0)
+            .size_range(240.0..=600.0)
             .frame(self.island(ctx))
             .show_separator_line(false)
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 let hide = self.tool_header(ui, "Notifications", |ide, ui| {
                     if ui::icon_button(ui, "delete", tr!("clear_all")).clicked() {
                         ide.notes.clear();
@@ -5081,7 +5086,7 @@ impl Ide {
         ctx.request_repaint_after(Duration::from_millis(500));
         let mut close = None;
         let mut open_log = false;
-        egui::Area::new(egui::Id::new("balloons"))
+        egui::Area::new(egui::Id::unique("balloons"))
             .anchor(Align2::RIGHT_BOTTOM, vec2(-16.0, -(STATUS_HEIGHT + 12.0)))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
@@ -5131,7 +5136,8 @@ impl Ide {
 
     // ---- Editor -------------------------------------------------------------------------
 
-    fn editor(&mut self, ctx: &egui::Context) {
+    fn editor(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         let gutter = self.gutter();
         let mut gutter_command = None;
         let mut reformat = false;
@@ -5146,7 +5152,7 @@ impl Ide {
                 bottom: ISLAND_RADIUS as i8,
                 ..Margin::ZERO
             }))
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 // The other groups, and the place left for the main one.
                 let full = ui.available_rect_before_wrap();
                 let main = self.layout_ui(ui, full, None).unwrap_or(full);
@@ -5217,7 +5223,7 @@ impl Ide {
                             ui.max_rect().right() - width - 22.0,
                             ui.cursor().top() + 8.0,
                         );
-                        egui::Area::new(egui::Id::new("editor_layout"))
+                        egui::Area::new(egui::Id::unique("editor_layout"))
                             .fixed_pos(pos)
                             .order(egui::Order::Middle)
                             .show(ctx, |ui| {
@@ -5271,12 +5277,12 @@ impl Ide {
                         EditorLayout::Split => {
                             let sync = self.scroll_sync.take();
                             let half = (ui.available_width() / 2.0).max(200.0);
-                            egui::SidePanel::right(egui::Id::new(("preview", path)))
+                            egui::Panel::right(egui::Id::unique(("preview", path)))
                                 .resizable(true)
-                                .default_width(half)
-                                .width_range(200.0..=(ui.available_width() - 200.0).max(220.0))
+                                .default_size(half)
+                                .size_range(200.0..=(ui.available_width() - 200.0).max(220.0))
                                 .frame(egui::Frame::NONE)
-                                .show_inside(ui, |ui| {
+                                .show(ui, |ui| {
                                     self.builtins[*plugin].preview(ui, path, &mut doc.text, sync);
                                 });
                         }
@@ -5289,7 +5295,7 @@ impl Ide {
                     let zoom = ui.ctx().input(|i| i.zoom_delta());
                     if (zoom - 1.0).abs() > f32::EPSILON {
                         // One point per notch of a wheel; a touchpad accumulates small steps.
-                        let id = egui::Id::new("editor_wheel_zoom");
+                        let id = egui::Id::unique("editor_wheel_zoom");
                         let total = ui.data_mut(|d| {
                             let acc = d.get_temp_mut_or_default::<f32>(id);
                             *acc += zoom.ln();
@@ -5312,7 +5318,7 @@ impl Ide {
                     } else {
                         let painter = ui.ctx().layer_painter(egui::LayerId::new(
                             egui::Order::Tooltip,
-                            egui::Id::new("zoom_hint"),
+                            egui::Id::unique("zoom_hint"),
                         ));
                         let galley = painter.layout_no_wrap(
                             format!("{} px", self.settings.font_size),
@@ -5380,7 +5386,7 @@ impl Ide {
                     breadcrumbs: !self.settings.breadcrumbs_off,
                     spellcheck: !self.settings.spellcheck_off,
                 };
-                let editor_id = egui::Id::new(("source", doc.path.clone(), self.active));
+                let editor_id = egui::Id::unique(("source", doc.path.clone(), self.active));
                 let output = doc.view.show(ui, editor_id, &mut doc.text, &options);
                 self.cursor = (output.line, output.column);
                 self.problems = (output.errors, output.warnings);
@@ -5493,7 +5499,7 @@ impl Ide {
             ui.spacing_mut().item_spacing.x = 2.0;
             let more = ui::icon_button(ui, "moreVertical", tr!("tab_options"));
             egui::Popup::menu(&more)
-                .id(egui::Id::new("tabs_more"))
+                .id(egui::Id::unique("tabs_more"))
                 .show(|ui| {
                     ui::menu_begin(ui);
                     if ui::menu_item(ui, Some("closeSmall"), tr!("close_tab"), None, false)
@@ -5538,7 +5544,7 @@ impl Ide {
                 });
             let list = ui::icon_button(ui, "chevronDown", tr!("open_tabs"));
             egui::Popup::menu(&list)
-                .id(egui::Id::new("tabs_list"))
+                .id(egui::Id::unique("tabs_list"))
                 .show(|ui| {
                     ui::menu_begin(ui);
                     for (i, doc) in self.documents.iter().enumerate() {
@@ -5608,7 +5614,7 @@ impl Ide {
                             );
                             let close_response = ui.interact(
                                 close_rect,
-                                egui::Id::new(("tab_close", i)),
+                                egui::Id::unique(("tab_close", i)),
                                 Sense::click(),
                             );
                             if doc.dirty() && !response.hovered() && !close_response.hovered() {
@@ -5883,21 +5889,22 @@ impl Ide {
 
     // ---- Status bar ---------------------------------------------------------------------
 
-    fn status_bar(&mut self, ctx: &egui::Context) {
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         let t = self.theme(ctx);
         let mut open_problems = false;
         // Chosen in the menus of the encoding and of the line endings.
         let mut encoding_change: Option<(crate::encoding::TextEncoding, bool)> = None;
         let mut ending_change: Option<crate::encoding::LineEnding> = None;
-        egui::TopBottomPanel::bottom("status")
-            .exact_height(STATUS_HEIGHT)
+        egui::Panel::bottom("status")
+            .exact_size(STATUS_HEIGHT)
             .frame(
                 egui::Frame::new()
                     .fill(t.frame)
                     .inner_margin(Margin::symmetric(8, 0)),
             )
             .show_separator_line(false)
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     // A project in a WSL distribution: WSL before its path.
@@ -6073,7 +6080,7 @@ impl Ide {
                                 .on_hover_text(tr!("line_endings_tooltip"));
                             let current = doc.encoding;
                             egui::Popup::menu(&encoding)
-                                .id(egui::Id::new("status_encoding"))
+                                .id(egui::Id::unique("status_encoding"))
                                 .show(|ui| {
                                     ui::menu_begin(ui);
                                     for (title, reopen) in [
@@ -6094,7 +6101,7 @@ impl Ide {
                                     }
                                 });
                             egui::Popup::menu(&endings)
-                                .id(egui::Id::new("status_line_endings"))
+                                .id(egui::Id::unique("status_line_endings"))
                                 .show(|ui| {
                                     ui::menu_begin(ui);
                                     ui::menu_title(ui, tr!("line_endings"));
@@ -6189,7 +6196,7 @@ impl Ide {
         self.run_dialog(ctx);
         self.tree_dialogs(ctx);
         if self.show_new_file {
-            let modal = egui::Modal::new(egui::Id::new("new_file")).show(ctx, |ui| {
+            let modal = egui::Modal::new(egui::Id::unique("new_file")).show(ctx, |ui| {
                 ui.set_width(420.0);
                 ui::dialog_title(ui, tr!("new_file"));
                 let field = ui.add(
@@ -6236,7 +6243,7 @@ impl Ide {
         self.switcher(ctx);
         self.each_builtin(|plugin, ide| plugin.windows(ctx, ide));
         if let Some((pane, agent)) = self.mcp_offer {
-            let modal = egui::Modal::new(egui::Id::new("mcp_offer")).show(ctx, |ui| {
+            let modal = egui::Modal::new(egui::Id::unique("mcp_offer")).show(ctx, |ui| {
                 ui.set_width(500.0);
                 ui::dialog_title(ui, &trf!("connect_atelier", agent = agent.name()));
                 ui.label(trf!("atelier_can_give_access_tools", agent = agent.name()));
@@ -6293,7 +6300,7 @@ impl Ide {
             }
         }
         if let Some(path) = self.project_choice.clone() {
-            let modal = egui::Modal::new(egui::Id::new("project_choice")).show(ctx, |ui| {
+            let modal = egui::Modal::new(egui::Id::unique("project_choice")).show(ctx, |ui| {
                 ui.set_width(460.0);
                 ui::dialog_title(ui, tr!("open_project"));
                 ui.label(trf!(
@@ -6332,7 +6339,7 @@ impl Ide {
             }
         }
         if let Some(action) = self.pending.clone() {
-            egui::Modal::new(egui::Id::new("unsaved")).show(ctx, |ui| {
+            egui::Modal::new(egui::Id::unique("unsaved")).show(ctx, |ui| {
                 ui.set_width(460.0);
                 ui::dialog_title(ui, tr!("unsaved_changes"));
                 ui.label(tr!("save_modified_files_before_continuing"));
@@ -6740,7 +6747,7 @@ impl Ide {
             .then(|| hits.get(self.palette_index).map(|h| h.target.clone()))
             .flatten();
         let width = 680.0_f32.min(ctx.content_rect().width() - 40.0);
-        let area = egui::Area::new(egui::Id::new("search_everywhere"))
+        let area = egui::Area::new(egui::Id::unique("search_everywhere"))
             .anchor(Align2::CENTER_TOP, vec2(0.0, 90.0))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
@@ -7423,7 +7430,7 @@ impl Ide {
             i.raw
                 .dropped_files
                 .iter()
-                .filter_map(|f| f.path.clone())
+                .map(|f| f.path().to_path_buf())
                 .collect()
         });
         for path in dropped {
@@ -7816,14 +7823,13 @@ impl Ide {
                 20
             }
         {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+            ctx.request_screenshot(|image| {
+                *SHOT.lock().unwrap_or_else(|e| e.into_inner()) = Some(image)
+            });
         }
-        let image = ctx.input(|i| {
-            i.raw.events.iter().find_map(|e| match e {
-                egui::Event::Screenshot { image, .. } => Some(image.clone()),
-                _ => None,
-            })
-        });
+        // The pixels arrive in a callback, a frame or two later.
+        static SHOT: std::sync::Mutex<Option<Arc<egui::ColorImage>>> = std::sync::Mutex::new(None);
+        let image = SHOT.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(image) = image {
             let _ = image::save_buffer(
                 &path,
@@ -7897,7 +7903,8 @@ impl eframe::App for Ide {
         }
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = &ui.ctx().clone();
         #[cfg(debug_assertions)]
         self.debug_screenshot(ctx);
         self.apply_pending_nav();
@@ -7934,7 +7941,7 @@ impl eframe::App for Ide {
         }
         if self.start_screen {
             Self::resize_edges(ctx);
-            self.start_screen_ui(ctx);
+            self.start_screen_ui(ui);
             self.dialogs(ctx);
             self.balloons(ctx);
             return;
@@ -7988,14 +7995,14 @@ impl eframe::App for Ide {
         self.dropped_files(ctx);
         Self::resize_edges(ctx);
         self.close_missing_tools();
-        self.toolbar(ctx);
-        self.status_bar(ctx);
-        self.stripe(ctx, Dock::Left);
-        self.stripe(ctx, Dock::Right);
-        self.left_panel(ctx);
-        self.right_panel(ctx);
-        self.bottom_panel(ctx);
-        self.editor(ctx);
+        self.toolbar(ui);
+        self.status_bar(ui);
+        self.stripe(ui, Dock::Left);
+        self.stripe(ui, Dock::Right);
+        self.left_panel(ui);
+        self.right_panel(ui);
+        self.bottom_panel(ui);
+        self.editor(ui);
         self.group_drag_ui(ctx);
         self.editor_windows(ctx);
         self.dialogs(ctx);

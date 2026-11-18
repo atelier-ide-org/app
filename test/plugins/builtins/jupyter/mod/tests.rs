@@ -37,18 +37,20 @@ fn a_notebook_renders() {
     let path = Path::new("demo.ipynb");
     let ctx = egui::Context::default();
     for _ in 0..3 {
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 plugin.preview(ui, path, &mut text, None);
             });
-        });
+        })
+        .drop_without_applying_deltas();
     }
     assert_eq!(text, before, "drawing does not change the notebook");
     let mut broken = "{".to_string();
-    let _ = ctx.run(egui::RawInput::default(), |ctx| {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    ctx.run_ui(egui::RawInput::default(), |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             plugin.preview(ui, Path::new("broken.ipynb"), &mut broken, None);
         });
-    });
+    })
+    .drop_without_applying_deltas();
     assert_eq!(broken, "{");
 }

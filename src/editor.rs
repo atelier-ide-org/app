@@ -2348,7 +2348,8 @@ impl EditorState {
         let galley = self.galley(ui, text, index, opt);
         let mut column = galley
             .cursor_from_pos(vec2(pos.x - origin.x - text_x, row / 2.0))
-            .index;
+            .index
+            .0;
         column = self.source_column(text, index, column);
         // On a collapsed line the placeholder and the closing are not text of this line.
         if let Some(r) = self.folded_at(index) {
@@ -2925,8 +2926,10 @@ impl EditorState {
                             let caret = Rect::from_min_size(pos2(x, y), vec2(2.0, row));
                             ui.ctx().output_mut(|o| {
                                 o.ime = Some(egui::output::IMEOutput {
+                                    purpose: egui::IMEPurpose::Normal,
                                     rect,
                                     cursor_rect: caret,
+                                    should_interrupt_composition: false,
                                 })
                             });
                         }
@@ -3134,7 +3137,7 @@ impl EditorState {
             self.select(pos, pos);
         }
         let range = (area.content_size.y - area.inner_rect.height()).max(1.0);
-        let fraction = (area.state.offset.y / range).clamp(0.0, 1.0);
+        let fraction = (area.state.clamped_offset().y / range).clamp(0.0, 1.0);
         output.scrolled = (fraction - self.scroll_fraction).abs() > 0.0005;
         self.scroll_fraction = fraction;
         (output.line, output.column) = self.position(text);
@@ -3188,7 +3191,7 @@ fn change_tooltip(ui: &egui::Ui, kind: MarkKind, before: &str, font: FontId) {
     egui::Tooltip::always_open(
         ui.ctx().clone(),
         ui.layer_id(),
-        ui.id().with("git_change_tip"),
+        ui.scope_id().with("git_change_tip"),
         pointer,
     )
     .show(|ui| {

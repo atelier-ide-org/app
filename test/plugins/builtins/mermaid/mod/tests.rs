@@ -63,11 +63,12 @@ fn markdown_is_cut_around_mermaid_fences_only() {
 /// Runs frames of `plugin` until its diagram is drawn.
 fn frames_until_drawn(plugin: &mut MermaidPlugin, ctx: &egui::Context, text: &mut String) {
     for _ in 0..400 {
-        let _ = ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 plugin.preview(ui, Path::new("a.mmd"), text, None);
             });
-        });
+        })
+        .drop_without_applying_deltas();
         if render_async(text, ctx).is_some() {
             return;
         }
@@ -85,11 +86,12 @@ fn invalid_diagrams_report_an_error_instead_of_panicking() {
     let mut plugin = MermaidPlugin::default();
     let mut text = FLOW.to_string();
     frames_until_drawn(&mut plugin, &ctx, &mut text);
-    let _ = ctx.run(Default::default(), |ctx| {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    ctx.run_ui(Default::default(), |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             plugin.preview(ui, Path::new("a.mmd"), &mut text, None)
         });
-    });
+    })
+    .drop_without_applying_deltas();
     assert_eq!(plugin.uris.len(), 1);
 }
 

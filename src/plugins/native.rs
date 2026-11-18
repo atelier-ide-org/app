@@ -232,7 +232,7 @@ fn fonts() -> Vec<u8> {
             .iter()
             .map(|(name, data)| protocol::FontData {
                 name: name.clone(),
-                bytes: data.font.to_vec(),
+                bytes: AsRef::<[u8]>::as_ref(&*data.font).to_vec(),
                 index: data.index,
             })
             .collect(),
@@ -482,7 +482,7 @@ impl NativePlugin {
         let theme = crate::ui::theme(ctx);
         let c = |c: Color32| c.to_srgba_unmultiplied();
         let style = protocol::Style {
-            egui: serde_json::to_value(&*ctx.style()).unwrap_or_default(),
+            egui: serde_json::to_value(&*ctx.global_style()).unwrap_or_default(),
             theme: protocol::Theme {
                 dark: theme.dark,
                 frame: c(theme.frame),
@@ -523,7 +523,7 @@ impl NativePlugin {
         let ctx = ui.ctx().clone();
         let content = ui.available_rect_before_wrap();
         ui.allocate_rect(content, Sense::hover());
-        let id = ui.id().with(("native", self.id, kind, key));
+        let id = ui.scope_id().with(("native", self.id, kind, key));
         let response = ui.interact(content, id, Sense::click_and_drag());
         let (plugin_id, name, instance) = (self.id, self.name, self.instance.clone());
         let surface = self.surfaces.entry((kind, key.to_string())).or_default();
@@ -611,6 +611,7 @@ impl NativePlugin {
                     unit,
                     delta,
                     modifiers,
+                    ..
                 } if hovered => {
                     let mut e = pointer_event(WHEEL, pos2(delta.x, delta.y));
                     e.unit = match unit {

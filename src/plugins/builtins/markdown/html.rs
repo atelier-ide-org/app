@@ -670,7 +670,7 @@ pub(super) fn show(ui: &mut egui::Ui, html: &str, base: &str, max_width: f32) {
     };
     // What is remembered of a row goes by what the block says, not by where it is drawn: the
     // viewer does not give the same place its name from one frame to the next.
-    let block = egui::Id::new(("markdown_html", html));
+    let block = egui::Id::unique(("markdown_html", html));
     let top_down = egui::Layout::top_down(Align::Min);
     ui.allocate_ui_with_layout(vec2(width, 0.0), top_down, |ui| {
         ui.set_width(width);
@@ -822,9 +822,9 @@ fn text_row(
         return;
     }
     let index = if local.x < gap.left() {
-        cursor.index.saturating_sub(1)
+        cursor.index.0.saturating_sub(1)
     } else {
-        cursor.index
+        cursor.index.0
     };
     if let Some((_, href)) = links.iter().find(|(range, _)| range.contains(&index)) {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);

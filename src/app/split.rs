@@ -107,7 +107,7 @@ pub fn show(
         bookmarks: &[],
         spellcheck: !settings.spellcheck_off,
     };
-    let id = egui::Id::new(("split_source", doc.path.clone()));
+    let id = egui::Id::unique(("split_source", doc.path.clone()));
     egui::Frame::new()
         .inner_margin(Margin::ZERO)
         .show(ui, |ui| {

@@ -1709,7 +1709,7 @@ impl EditorState {
     /// The mouse over a list: the wheel scrolls it and the row under the pointer is selected.
     pub(super) fn assist_list_mouse(&mut self, ui: &Ui, pointer: Option<Pos2>) {
         let Some(pos) = pointer else { return };
-        let wheel = ui.input(|i| i.smooth_scroll_delta.y + i.raw_scroll_delta.y);
+        let wheel = ui.input(|i| i.smooth_scroll_delta.y);
         if let Some(chooser) = &mut self.assist.chooser
             && let Some(rect) = chooser.rect.filter(|r| r.contains(pos))
         {
@@ -1717,7 +1717,6 @@ impl EditorState {
                 scroll_chooser(chooser, (wheel / ROW_HEIGHT).clamp(-3.0, 3.0));
                 ui.ctx().input_mut(|i| {
                     i.smooth_scroll_delta = egui::Vec2::ZERO;
-                    i.raw_scroll_delta = egui::Vec2::ZERO;
                 });
             }
             if ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
@@ -1741,7 +1740,6 @@ impl EditorState {
             };
             ui.ctx().input_mut(|i| {
                 i.smooth_scroll_delta = egui::Vec2::ZERO;
-                i.raw_scroll_delta = egui::Vec2::ZERO;
             });
         }
     }
@@ -1753,7 +1751,7 @@ impl EditorState {
         };
         let busy = rename.answer.is_some();
         let mut cancel = false;
-        egui::Area::new(egui::Id::new("rename_popup"))
+        egui::Area::new(egui::Id::unique("rename_popup"))
             .order(Order::Foreground)
             .fixed_pos(pos2(at.x, at.y + 4.0))
             .show(ui.ctx(), |ui| {
@@ -1769,7 +1767,7 @@ impl EditorState {
                                 .font(crate::ui::semibold(12.5))
                                 .color(t.text_secondary),
                         );
-                        let id = egui::Id::new("rename_field");
+                        let id = egui::Id::unique("rename_field");
                         let mut output = egui::TextEdit::singleline(&mut rename.name)
                             .id(id)
                             .font(egui::TextStyle::Monospace)
@@ -1830,7 +1828,7 @@ impl EditorState {
         let t = opt.theme;
         let painter = ui.ctx().layer_painter(egui::LayerId::new(
             Order::Foreground,
-            egui::Id::new("editor_assist"),
+            egui::Id::unique("editor_assist"),
         ));
         let screen = ui.ctx().content_rect();
         let line = self.line_of(self.cursor);

@@ -622,7 +622,7 @@ impl View {
                         egui::TextEdit::multiline(&mut source)
                             .font(egui::TextStyle::Monospace)
                             .code_editor()
-                            .frame(false)
+                            .frame(egui::Frame::NONE)
                             .desired_rows(1)
                             .desired_width(f32::INFINITY)
                             .layouter(&mut layouter),

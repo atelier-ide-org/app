@@ -183,7 +183,7 @@ impl Ide {
         }
         let t = self.theme(ctx);
         let width = 460.0_f32.min(ctx.content_rect().width() - 40.0);
-        egui::Area::new(egui::Id::new("switcher"))
+        egui::Area::new(egui::Id::unique("switcher"))
             .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
@@ -436,7 +436,7 @@ impl Ide {
         };
         let t = self.theme(ctx);
         let mut restore = false;
-        let modal = egui::Modal::new(egui::Id::new("history_comparison")).show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::unique("history_comparison")).show(ctx, |ui| {
             ui.set_width((ctx.content_rect().width() * 0.7).clamp(420.0, 1000.0));
             ui::dialog_title(ui, &trf!("version_of", when = comparison.when));
             ui.label(

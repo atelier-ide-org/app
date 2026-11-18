@@ -157,19 +157,21 @@ fn every_view_and_dialog_renders() {
     ui::install(&ctx, ui::theme_by_index(0), 14.0);
     let frame = |plugin: &mut GitPlugin, host: &mut NoHost| {
         for _ in 0..2 {
-            let _ = ctx.run(Default::default(), |ctx| {
-                egui::TopBottomPanel::top("bar").show(ctx, |ui| {
+            ctx.run_ui(Default::default(), |ui| {
+                let ctx = &ui.ctx().clone();
+                egui::Panel::top("bar").show(ui, |ui| {
                     ui.horizontal(|ui| {
                         plugin.toolbar(ui, host);
                         plugin.status_bar(ui, host);
                     });
                 });
-                egui::SidePanel::left("commit")
-                    .show(ctx, |ui| plugin.tool_window("git.commit", ui, host));
+                egui::Panel::left("commit")
+                    .show(ui, |ui| plugin.tool_window("git.commit", ui, host));
                 egui::CentralPanel::default()
-                    .show(ctx, |ui| plugin.tool_window("git.log", ui, host));
+                    .show(ui, |ui| plugin.tool_window("git.log", ui, host));
                 plugin.windows(ctx, host);
-            });
+            })
+            .drop_without_applying_deltas();
         }
     };
     frame(&mut plugin, &mut host);
