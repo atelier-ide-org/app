@@ -124,7 +124,9 @@ fn a_file_keeps_its_encoding_and_can_be_converted() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// The paths of WSL are Windows paths: elsewhere `\` separates nothing.
 #[test]
+#[cfg(windows)]
 fn wsl_projects_show_their_distribution_and_linux_path() {
     let path = Path::new(r"\\?\UNC\wsl.localhost\Ubuntu\home\thomas\workspace\app");
     assert_eq!(display_path(path), "Ubuntu: ~/workspace/app");
