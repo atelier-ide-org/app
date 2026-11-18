@@ -1,5 +1,5 @@
 ---
-default: minor
+default: major
 ---
 
 # Groupes d'éditeurs et fenêtres, Ctrl+clic instantané, et une interface qui ne bloque plus sur le disque
