@@ -506,10 +506,21 @@ pub fn install(ctx: &egui::Context, t: Theme, editor_font_size: f32) {
         s.icon_width = 15.0;
         s.icon_spacing = 6.0;
         s.combo_height = 300.0;
+        // Scroll bars as IntelliJ draws them: a translucent thumb over the content, thin until
+        // the pointer is on it, without a track behind it. The thumb takes the color of the
+        // text, so it was nearly white on a dark theme at the opacity egui gives it.
         s.scroll = egui::style::ScrollStyle {
             bar_width: 8.0,
             floating_width: 4.0,
             floating_allocated_width: 0.0,
+            // Off the edge of the panel and of its rounded corners.
+            bar_outer_margin: 2.0,
+            // A long file keeps a thumb that can be seen and grabbed.
+            handle_min_length: 32.0,
+            active_background_opacity: 0.0,
+            interact_background_opacity: 0.0,
+            active_handle_opacity: 0.22,
+            interact_handle_opacity: 0.42,
             ..egui::style::ScrollStyle::floating()
         };
         style.interaction.selectable_labels = false;

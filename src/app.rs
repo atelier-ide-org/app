@@ -275,6 +275,18 @@ struct Settings {
     window_maximized: bool,
 }
 
+/// How long a jump to a file that is not open waits for it to be read, before leaving it to
+/// the next frames.
+const JUMP_WAIT: Duration = Duration::from_millis(40);
+
+/// The room between the background of a row of the project list and what is written in it.
+const PROJECT_ROW_PAD: f32 = 12.0;
+
+/// The rows Search Everywhere shows at once; the others are scrolled to.
+const PALETTE_ROWS: usize = 16;
+/// The room above the first row of its list and under the last one.
+const PALETTE_PAD: f32 = 6.0;
+
 /// The projects the Projects page keeps; the project widget shows the first ten.
 const MAX_RECENT: usize = 50;
 
@@ -1273,6 +1285,13 @@ impl Ide {
     }
     /// Collects files read in the background; a file that cannot be read is closed.
     fn poll_loading(&mut self, ctx: &egui::Context) {
+        self.collect_loaded();
+        if self.documents.iter().any(|d| d.loading.is_some()) {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
+    }
+    /// Takes the files that were read since the last call; one that cannot be read is closed.
+    fn collect_loaded(&mut self) {
         let mut failed = Vec::new();
         for (index, doc) in self.documents.iter_mut().enumerate() {
             if let Some(Err(e)) = doc.poll() {
@@ -1285,9 +1304,6 @@ impl Ide {
                 self.active = self.active.saturating_sub(1);
             }
             self.status = message;
-        }
-        if self.documents.iter().any(|d| d.loading.is_some()) {
-            ctx.request_repaint_after(Duration::from_millis(16));
         }
     }
     /// Waits for the answer of the disk to the last question of [`Ide::watch_files`].
@@ -1818,6 +1834,15 @@ impl Ide {
         }
         self.pending_nav = Some((path, NavTarget::Place(target)));
         self.apply_pending_nav();
+        // A file that was not open is read in the background, and the place was only gone to a
+        // few frames later. A file of code is read within a few milliseconds: the jump waits
+        // that long for it. A big file, or a slow disk, is still waited for across the frames.
+        let deadline = Instant::now() + JUMP_WAIT;
+        while self.pending_nav.is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+            self.collect_loaded();
+            self.apply_pending_nav();
+        }
     }
 
     /// Puts the caret of the active document on a 0-based line and column.
@@ -1941,6 +1966,11 @@ impl Ide {
         self.palette_query.clear();
         self.palette_index = 0;
         self.file_index.invalidate();
+        // The files are listed while the first letters are typed, not after them.
+        if mode == PaletteMode::Everywhere {
+            let repaint = self.repaint.clone();
+            self.file_index.refresh(&self.root, move || repaint());
+        }
     }
 
     fn perform_action(&mut self, index: usize) {
@@ -1982,6 +2012,9 @@ impl Ide {
     fn shortcuts(&mut self, ctx: &egui::Context) {
         use egui::{Key, Modifiers};
         let command = Modifiers::COMMAND;
+        // The shortcuts of the plugins first: theirs hold more keys than the ones below, which
+        // would take them (Ctrl+Shift+F, Find in Files, opened the search of the file as Ctrl+F).
+        self.each_builtin(|plugin, ide| plugin.shortcuts(ctx, ide));
         let pressed = |modifiers, key| ctx.input_mut(|i| i.consume_key(modifiers, key));
         // egui ignores extra Shift when matching logical shortcuts: most specific first.
         if pressed(command | Modifiers::SHIFT, Key::S) {
@@ -2120,7 +2153,6 @@ impl Ide {
             }
         }
         self.shift_down = shift;
-        self.each_builtin(|plugin, ide| plugin.shortcuts(ctx, ide));
     }
 
     // ---- Title bar ----------------------------------------------------------------------
@@ -2624,9 +2656,13 @@ impl Ide {
             const WIDTH: f32 = 380.0;
             ui.set_width(WIDTH);
             ui::menu_begin(ui);
-            ui.add_space(2.0);
-            ui::section(ui, tr!("recent_projects"));
-            ui.add_space(2.0);
+            ui.add_space(4.0);
+            // The title starts where the badges of the projects do.
+            ui.horizontal(|ui| {
+                ui.add_space(PROJECT_ROW_PAD + 4.0);
+                ui::section(ui, tr!("recent_projects"));
+            });
+            ui.add_space(4.0);
             // The same folder may be there as `\?\UNC\…` and as `\…`: once.
             let mut seen = Vec::new();
             let recent: Vec<PathBuf> = self
@@ -2727,8 +2763,13 @@ impl Ide {
         let exists = path.is_dir();
         let (rect, response) = ui.allocate_exact_size(vec2(width, 40.0), Sense::click());
         ui::paint_row(ui, rect, current, response.hovered());
-        let badge =
-            Rect::from_center_size(pos2(rect.left() + 22.0, rect.center().y), vec2(24.0, 24.0));
+        // The background of the row (the project that is open, the one under the pointer) is
+        // 4 px inside it: the badge and the text keep PROJECT_ROW_PAD from its edges, where
+        // they nearly touched them.
+        let badge = Rect::from_center_size(
+            pos2(rect.left() + 4.0 + PROJECT_ROW_PAD + 12.0, rect.center().y),
+            vec2(24.0, 24.0),
+        );
         let color = if exists {
             project_color(&name)
         } else {
@@ -2743,7 +2784,7 @@ impl Ide {
             Color32::WHITE,
         );
         let x = badge.right() + 10.0;
-        let max = rect.right() - 12.0 - x;
+        let max = rect.right() - 4.0 - PROJECT_ROW_PAD - x;
         let main = if exists { t.text } else { t.text_disabled };
         let title = ui::elided(ui, &name, ui::semibold(13.0), main, max);
         ui.painter().galley(pos2(x, rect.top() + 4.0), title, main);
@@ -6431,8 +6472,8 @@ impl Ide {
                     .map(|p| {
                         p.strip_prefix(&self.root)
                             .unwrap_or(p)
-                            .display()
-                            .to_string()
+                            .to_string_lossy()
+                            .replace('\\', "/")
                     })
                     .unwrap_or_default(),
                 icon: None,
@@ -6512,7 +6553,12 @@ impl Ide {
                 Some((tier, e))
             })
             .collect();
-        matches.sort_by_key(|(tier, e)| (*tier, e.name.len(), e.rel.len()));
+        // In the order of their paths for the rest, whatever order the disk listed them in.
+        matches.sort_by(|(a_tier, a), (b_tier, b)| {
+            (*a_tier, a.name.len(), a.rel.len())
+                .cmp(&(*b_tier, b.name.len(), b.rel.len()))
+                .then_with(|| a.rel.cmp(&b.rel))
+        });
         let matches = matches.into_iter().map(|(_, e)| e);
         let hits: Vec<Hit> = matches
             .into_iter()
@@ -6522,7 +6568,7 @@ impl Ide {
                 let relative = path
                     .parent()
                     .and_then(|p| p.strip_prefix(&self.root).ok())
-                    .map(|p| p.display().to_string())
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
                     .unwrap_or_default();
                 Hit {
                     label: path
@@ -6589,7 +6635,8 @@ impl Ide {
                     hits.push(Hit {
                         label: label.to_string(),
                         hint: hint.to_string(),
-                        icon: Some("git"),
+                        // The icon of the plugin the command belongs to.
+                        icon: Some(plugin.icon()),
                         file: None,
                         target: Target::Builtin(plugin.id(), command.id),
                     });
@@ -6644,8 +6691,8 @@ impl Ide {
                 .path
                 .strip_prefix(&root)
                 .unwrap_or(&found.path)
-                .display()
-                .to_string();
+                .to_string_lossy()
+                .replace('\\', "/");
             for hit in found.hits {
                 search.hits.push(Hit {
                     label: hit.text.clone(),
@@ -6759,88 +6806,107 @@ impl Ide {
                                     self.palette_index = 0;
                                 }
                             });
-                        ui.separator();
-                        egui::ScrollArea::vertical()
-                            .max_height(420.0)
-                            .show(ui, |ui| {
-                                ui.spacing_mut().item_spacing.y = 0.0;
-                                if hits.is_empty() {
-                                    ui.add_space(12.0);
-                                    ui.vertical_centered(|ui| {
-                                        ui.label(
-                                            RichText::new(tr!("no_results"))
-                                                .color(t.text_secondary),
-                                        );
-                                    });
-                                    ui.add_space(12.0);
-                                }
-                                for (i, hit) in hits.iter().enumerate() {
-                                    let selected = i == self.palette_index;
-                                    let (rect, response) = ui::row(ui, selected);
-                                    if selected && (down || up) {
-                                        response.scroll_to_me(None);
+                        // A line under the field, from one edge of the popup to the other.
+                        let (line, _) = ui.allocate_exact_size(vec2(width, 1.0), Sense::hover());
+                        ui.painter().rect_filled(line, 0.0, t.border);
+                        // The list is as high as its rows, up to PALETTE_ROWS of them, and is
+                        // given that height: left to take what the popup had at the frame
+                        // before, it stayed as small as it was when the search began, with
+                        // rows cut in two.
+                        let height = if hits.is_empty() {
+                            44.0
+                        } else if hits.len() > PALETTE_ROWS {
+                            // Whole rows: the room under the last one is scrolled to.
+                            PALETTE_ROWS as f32 * ui::ROW + PALETTE_PAD
+                        } else {
+                            hits.len() as f32 * ui::ROW + 2.0 * PALETTE_PAD
+                        };
+                        ui.allocate_ui(vec2(width, height), |ui| {
+                            egui::ScrollArea::vertical()
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    ui.spacing_mut().item_spacing.y = 0.0;
+                                    if !hits.is_empty() {
+                                        ui.add_space(PALETTE_PAD);
                                     }
-                                    let icon = Rect::from_min_size(
-                                        pos2(rect.left() + 16.0, rect.center().y - 8.0),
-                                        vec2(16.0, 16.0),
-                                    );
-                                    match (&hit.file, hit.icon) {
-                                        (Some(path), _) => {
-                                            egui::Image::new(self.file_icon(ui.ctx(), path))
-                                                .paint_at(ui, icon)
+                                    if hits.is_empty() {
+                                        ui.add_space(12.0);
+                                        ui.vertical_centered(|ui| {
+                                            ui.label(
+                                                RichText::new(tr!("no_results"))
+                                                    .color(t.text_secondary),
+                                            );
+                                        });
+                                        ui.add_space(12.0);
+                                    }
+                                    for (i, hit) in hits.iter().enumerate() {
+                                        let selected = i == self.palette_index;
+                                        let (rect, response) = ui::row(ui, selected);
+                                        if selected && (down || up) {
+                                            response.scroll_to_me(None);
                                         }
-                                        (None, Some(name)) => ui::paint_icon(ui, name, icon),
-                                        _ => {}
+                                        let icon = Rect::from_min_size(
+                                            pos2(rect.left() + 16.0, rect.center().y - 8.0),
+                                            vec2(16.0, 16.0),
+                                        );
+                                        match (&hit.file, hit.icon) {
+                                            (Some(path), _) => {
+                                                egui::Image::new(self.file_icon(ui.ctx(), path))
+                                                    .paint_at(ui, icon)
+                                            }
+                                            (None, Some(name)) => ui::paint_icon(ui, name, icon),
+                                            _ => {}
+                                        }
+                                        // The label and its hint share the row, cut with `…`
+                                        // rather than over each other or out of the popup: the
+                                        // hint takes at most 45 % of it.
+                                        let x = icon.right() + 8.0;
+                                        let room = (rect.right() - 16.0 - x).max(0.0);
+                                        let hint = ui::elided(
+                                            ui,
+                                            &hit.hint,
+                                            FontId::proportional(12.0),
+                                            t.text_secondary,
+                                            room * 0.45,
+                                        );
+                                        let hint_w = if hit.hint.is_empty() {
+                                            0.0
+                                        } else {
+                                            hint.size().x + 16.0
+                                        };
+                                        let label = ui::elided(
+                                            ui,
+                                            &hit.label,
+                                            FontId::proportional(13.0),
+                                            t.text,
+                                            (room - hint_w).max(0.0),
+                                        );
+                                        let painter = ui.painter().with_clip_rect(rect);
+                                        painter.galley(
+                                            pos2(x, rect.center().y - label.size().y / 2.0),
+                                            label,
+                                            t.text,
+                                        );
+                                        painter.galley(
+                                            pos2(
+                                                rect.right() - 16.0 - hint.size().x,
+                                                rect.center().y - hint.size().y / 2.0,
+                                            ),
+                                            hint,
+                                            t.text_secondary,
+                                        );
+                                        if response.clicked() {
+                                            chosen = Some(hit.target.clone());
+                                        }
+                                        if response.hovered()
+                                            && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO)
+                                        {
+                                            self.palette_index = i;
+                                        }
                                     }
-                                    // The label and its hint share the row, cut with `…`
-                                    // rather than over each other or out of the popup: the
-                                    // hint takes at most 45 % of it.
-                                    let x = icon.right() + 8.0;
-                                    let room = (rect.right() - 16.0 - x).max(0.0);
-                                    let hint = ui::elided(
-                                        ui,
-                                        &hit.hint,
-                                        FontId::proportional(12.0),
-                                        t.text_secondary,
-                                        room * 0.45,
-                                    );
-                                    let hint_w = if hit.hint.is_empty() {
-                                        0.0
-                                    } else {
-                                        hint.size().x + 16.0
-                                    };
-                                    let label = ui::elided(
-                                        ui,
-                                        &hit.label,
-                                        FontId::proportional(13.0),
-                                        t.text,
-                                        (room - hint_w).max(0.0),
-                                    );
-                                    let painter = ui.painter().with_clip_rect(rect);
-                                    painter.galley(
-                                        pos2(x, rect.center().y - label.size().y / 2.0),
-                                        label,
-                                        t.text,
-                                    );
-                                    painter.galley(
-                                        pos2(
-                                            rect.right() - 16.0 - hint.size().x,
-                                            rect.center().y - hint.size().y / 2.0,
-                                        ),
-                                        hint,
-                                        t.text_secondary,
-                                    );
-                                    if response.clicked() {
-                                        chosen = Some(hit.target.clone());
-                                    }
-                                    if response.hovered()
-                                        && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO)
-                                    {
-                                        self.palette_index = i;
-                                    }
-                                }
-                                ui.add_space(4.0);
-                            });
+                                    ui.add_space(PALETTE_PAD);
+                                });
+                        });
                     });
             });
         let clicked_outside = ctx.input(|i| i.pointer.any_pressed())
@@ -7682,6 +7748,18 @@ impl Ide {
             if std::env::var_os("ATELIER_SHOT_RUN").is_some() {
                 self.run_configs().temporary("gradle build", "gradle build");
                 self.open_run_dialog();
+            }
+            // The editor split (`right`, `down`), or the file in a window of its own (`window`).
+            match std::env::var("ATELIER_SHOT_SPLIT").as_deref() {
+                Ok("right") => self.split_to(false),
+                Ok("down") => self.split_to(true),
+                Ok("window") => self.detach(self.active, None),
+                _ => {}
+            }
+            // Search Everywhere, with this typed in it.
+            if let Ok(query) = std::env::var("ATELIER_SHOT_PALETTE") {
+                self.open_palette();
+                self.palette_query = query;
             }
             if let Ok(query) = std::env::var("ATELIER_SHOT_SYMBOLS") {
                 self.open_palette_as(PaletteMode::Symbols);

@@ -1141,3 +1141,36 @@ fn languages_follow_the_files_read_in_the_background() {
     assert!(ide.builtin_enabled("rust"), "a Rust file appeared");
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// Ctrl+Shift+F is Find in Files: the search of the project, not the search of the file that
+/// Ctrl+F opens (egui takes Ctrl+Shift+F for Ctrl+F when nothing more precise took it first).
+#[test]
+fn ctrl_shift_f_opens_find_in_files() {
+    use egui::{Event, Key, Modifiers};
+    let mut ide = ide();
+    let ctx = egui::Context::default();
+    ide.apply_theme(&ctx);
+    let press = |ide: &mut Ide, modifiers: Modifiers| {
+        let _ = ctx.run(
+            egui::RawInput {
+                modifiers,
+                events: vec![Event::Key {
+                    key: Key::F,
+                    physical_key: Some(Key::F),
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                }],
+                ..Default::default()
+            },
+            |ctx| ide.shortcuts(ctx),
+        );
+    };
+    press(&mut ide, Modifiers::COMMAND | Modifiers::SHIFT);
+    assert_eq!(ide.bottom_tool.map(|t| t.id), Some("search.results"));
+    assert!(!ide.find.open, "not the search of the file");
+    ide.bottom_tool = None;
+    press(&mut ide, Modifiers::COMMAND);
+    assert!(ide.find.open, "Ctrl+F is still the search of the file");
+    assert!(ide.bottom_tool.is_none());
+}

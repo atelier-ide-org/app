@@ -21,7 +21,9 @@ use std::path::{Path, PathBuf};
 pub const MAIN: u64 = 0;
 /// Space between two groups, where the divider is dragged.
 const GAP: f32 = 5.0;
-const BAR: f32 = 32.0;
+/// The tab bar of a group: the height and the tabs of the one of the main group.
+const BAR: f32 = 40.0;
+const TAB: f32 = 28.0;
 
 /// A part of the editor with tabs of its own.
 pub struct Group {
@@ -270,6 +272,28 @@ impl Ide {
         let ids: Vec<u64> = layout.leaves().into_iter().copied().collect();
         let viewport = ui.ctx().viewport_id();
         let mut main = None;
+        let t = self.theme(ui.ctx());
+        if ids.len() > 1 {
+            // Each group is an island of its own, as the panels of the window are: rounded,
+            // with the color of the window between them. The editor of the main window keeps
+            // a strip under its groups for the rounding of its bottom corners: the groups
+            // that reach the bottom take it.
+            let radius = f32::from(super::ISLAND_RADIUS);
+            let below = if window.is_none() { radius } else { 0.0 };
+            let painter = ui.painter();
+            painter.rect_filled(
+                Rect::from_min_max(rect.min, pos2(rect.right(), rect.bottom() + below)),
+                0.0,
+                t.frame,
+            );
+            for area in &rects {
+                let mut island = *area;
+                if (island.bottom() - rect.bottom()).abs() < 0.5 {
+                    island.max.y += below;
+                }
+                painter.rect_filled(island, radius, t.island);
+            }
+        }
         let targets = self.drop_targets.entry(viewport).or_default();
         targets.clear();
         targets.extend(ids.iter().copied().zip(rects.iter().copied()));
@@ -281,7 +305,6 @@ impl Ide {
             }
         }
         // Dragging a divider changes the share of the two sides.
-        let t = self.theme(ui.ctx());
         let mut moves = Vec::new();
         for divider in &dividers {
             let response = ui.interact(
@@ -327,14 +350,13 @@ impl Ide {
         let viewport = ui.ctx().viewport_id();
         let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
         ui.set_clip_rect(rect);
-        ui.painter().rect_filled(rect, 0.0, t.island);
-        // The tabs.
+        // The tabs, drawn as the ones of the main group are.
         let bar = Rect::from_min_size(rect.min, vec2(rect.width(), BAR));
         ui.painter().line_segment(
             [bar.left_bottom(), bar.right_bottom()],
             Stroke::new(1.0_f32, t.separator),
         );
-        let mut x = bar.left() + 4.0;
+        let mut x = bar.left() + 6.0;
         let mut select = None;
         let mut close = None;
         let mut action: Option<(usize, GroupAction)> = None;
@@ -354,12 +376,12 @@ impl Ide {
         for (i, (path, title, dirty)) in titles.iter().enumerate() {
             let galley =
                 ui.painter()
-                    .layout_no_wrap(title.clone(), FontId::proportional(12.5), t.text);
-            let width = 8.0 + 16.0 + 5.0 + galley.size().x + 6.0 + 16.0 + 6.0;
-            if x + width > bar.right() - 4.0 && i > active {
+                    .layout_no_wrap(title.clone(), FontId::proportional(13.0), t.text);
+            let width = 10.0 + 16.0 + 6.0 + galley.size().x + 6.0 + 16.0 + 8.0;
+            if x + width > bar.right() - 6.0 && i > active {
                 break;
             }
-            let tab = Rect::from_min_size(pos2(x, bar.top() + 3.0), vec2(width, BAR - 6.0));
+            let tab = Rect::from_min_size(pos2(x, bar.center().y - TAB / 2.0), vec2(width, TAB));
             x += width + 2.0;
             let response = ui.interact(
                 tab,
@@ -369,26 +391,26 @@ impl Ide {
             if i == active {
                 ui.painter().rect(
                     tab,
-                    5.0,
+                    6.0,
                     t.frame,
                     Stroke::new(1.0_f32, t.border),
                     StrokeKind::Inside,
                 );
             } else if response.hovered() {
-                ui.painter().rect_filled(tab, 5.0, t.hover);
+                ui.painter().rect_filled(tab, 6.0, t.hover);
             }
             let icon = Rect::from_min_size(
-                pos2(tab.left() + 8.0, tab.center().y - 8.0),
+                pos2(tab.left() + 10.0, tab.center().y - 8.0),
                 vec2(16.0, 16.0),
             );
             egui::Image::new(self.file_icon(ui.ctx(), path)).paint_at(&ui, icon);
             ui.painter().galley(
-                pos2(icon.right() + 5.0, tab.center().y - galley.size().y / 2.0),
+                pos2(icon.right() + 6.0, tab.center().y - galley.size().y / 2.0),
                 galley,
                 t.text,
             );
             let close_rect = Rect::from_min_size(
-                pos2(tab.right() - 22.0, tab.center().y - 8.0),
+                pos2(tab.right() - 24.0, tab.center().y - 8.0),
                 vec2(16.0, 16.0),
             );
             let close_response = ui.interact(

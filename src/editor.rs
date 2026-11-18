@@ -2559,7 +2559,7 @@ impl EditorState {
                         let url = &text[url];
                         match crate::languages::lsp::uri_to_path(url).filter(|p| p.is_file()) {
                             Some(path) => {
-                                output.navigate = Some(crate::languages::Location {
+                                self.assist.navigate = Some(crate::languages::Location {
                                     path: Some(path),
                                     line: 0,
                                     column: 0,
@@ -2571,7 +2571,7 @@ impl EditorState {
                             None => ui.ctx().open_url(egui::OpenUrl::new_tab(url)),
                         }
                     } else {
-                        self.assist_goto(at);
+                        self.assist_goto_now(ui, text, opt, at);
                     }
                 }
                 if !ui.input(|i| i.pointer.primary_down()) {
