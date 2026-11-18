@@ -1132,6 +1132,9 @@ fn a_window_does_not_put_back_what_another_changed() {
 fn languages_follow_the_files_read_in_the_background() {
     let dir = temp_project("languages-follow");
     let mut ide = ide_in(dir.clone());
+    // A reading started when the IDE opened could be done already on a fast machine: this
+    // test starts from a project whose files are not known.
+    ide.extensions_job = None;
     ide.load_project_plugins(true);
     assert!(ide.auto_plugins.contains("rust"));
     assert!(ide.builtin_enabled("rust"), "on until the project is read");
