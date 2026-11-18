@@ -13,6 +13,11 @@ use std::{
 /// Lines of history kept above the screen.
 const SCROLLBACK: usize = 10_000;
 
+/// A size of the screen for vt100, which takes them as non-zero; 0 is taken as 1.
+pub fn cells(n: u16) -> std::num::NonZeroU16 {
+    std::num::NonZeroU16::new(n).unwrap_or(std::num::NonZeroU16::MIN)
+}
+
 /// What a program asks of the terminal beyond drawing: the text it copies (OSC 52), as a
 /// full-screen AI does when its own selection is copied.
 #[derive(Default)]
@@ -267,7 +272,12 @@ impl Terminal {
             child: Some(child),
             writer,
             rx,
-            parser: vt100::Parser::new_with_callbacks(24, 120, SCROLLBACK, Requests::default()),
+            parser: vt100::Parser::new_with_callbacks(
+                cells(24),
+                cells(120),
+                SCROLLBACK,
+                Requests::default(),
+            ),
             focused: false,
             want_focus: false,
             wheel: 0.0,
@@ -366,7 +376,7 @@ impl Terminal {
                 })
                 .is_ok()
             {
-                self.parser.screen_mut().set_size(rows, cols);
+                self.parser.screen_mut().set_size(cells(rows), cells(cols));
                 self.size = size;
             }
         }

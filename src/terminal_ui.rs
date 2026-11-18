@@ -186,7 +186,7 @@ pub fn wheel_bytes(screen: &vt100::Screen, up: bool, lines: usize, cell: (u16, u
 
 /// Text of the selection, rows joined by line breaks, trailing spaces removed.
 fn selected_text(screen: &vt100::Screen, from: (u16, u16), to: (u16, u16)) -> String {
-    let (_, cols) = screen.size();
+    let cols = screen.size().1.get();
     let mut out = String::new();
     for row in from.0..=to.0 {
         let start = if row == from.0 { from.1 } else { 0 };
@@ -368,6 +368,7 @@ pub fn show(
         (rect.width() / char_w) as u16,
     );
     let (rows, cols) = term.screen_ref().size();
+    let (rows, cols) = (rows.get(), cols.get());
     // What a program copied (an AI that has its own selection) goes to the clipboard.
     if let Some(text) = term.take_copied() {
         ui.ctx().copy_text(text);
@@ -692,7 +693,8 @@ mod tests {
 
     #[test]
     fn links_are_found_under_the_pointer_whatever_the_colors() {
-        let mut parser = vt100::Parser::new(4, 80, 0);
+        let mut parser =
+            vt100::Parser::new(crate::terminal::cells(4), crate::terminal::cells(80), 0);
         // A colored address, as cargo and npm print them.
         parser.process(
             b"Serving at \x1b[36mhttp://localhost:8080/\x1b[0m now\r\n\xe6\x97\xa5 https://x.dev",
@@ -714,13 +716,15 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let url = format!("https://example.com/{}", "abcdefghij".repeat(5));
         // Wrapped by the terminal: the rows go on into each other.
-        let mut parser = vt100::Parser::new(4, 40, 0);
+        let mut parser =
+            vt100::Parser::new(crate::terminal::cells(4), crate::terminal::cells(40), 0);
         parser.process(format!("see {url} ok").as_bytes());
         let (spans, link) = link_at(parser.screen(), (1, 10), 4, 40, root).expect("a link");
         assert_eq!(link, Link::Url(url.clone()));
         assert_eq!(spans, [(0, 4..40), (1, 0..(4 + url.len() - 40))]);
         // Cut by a program that wraps its own text, as an AI does: the next rows are indented.
-        let mut parser = vt100::Parser::new(4, 40, 0);
+        let mut parser =
+            vt100::Parser::new(crate::terminal::cells(4), crate::terminal::cells(40), 0);
         let chars: Vec<char> = format!("❯ see {url} ok").chars().collect();
         let mut rows: Vec<String> = vec![chars[..38].iter().collect()];
         for piece in chars[38..].chunks(36) {
@@ -732,7 +736,8 @@ mod tests {
         assert_eq!(spans.len(), 3);
         assert_eq!(spans[0], (0, 6..38));
         // A short address at the end of a row is not joined to the words of the next one.
-        let mut parser = vt100::Parser::new(4, 40, 0);
+        let mut parser =
+            vt100::Parser::new(crate::terminal::cells(4), crate::terminal::cells(40), 0);
         parser.process(b"a few words then https://x.dev/abcdefgh\r\n  more words");
         let (_, link) = link_at(parser.screen(), (0, 20), 4, 40, root).expect("a link");
         assert_eq!(link, Link::Url("https://x.dev/abcdefgh".into()));
@@ -756,7 +761,8 @@ mod tests {
 
     #[test]
     fn paths_of_the_project_are_links() {
-        let mut parser = vt100::Parser::new(2, 80, 0);
+        let mut parser =
+            vt100::Parser::new(crate::terminal::cells(2), crate::terminal::cells(80), 0);
         parser.process(b"error: --> src/main.rs:12:5");
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let (_, link) = link_at(parser.screen(), (0, 15), 2, 80, root).expect("a link");
