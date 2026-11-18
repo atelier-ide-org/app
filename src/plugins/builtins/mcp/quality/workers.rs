@@ -32,6 +32,15 @@ fn copy_changed(root: &Path, dst: &Path) -> io::Result<()> {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::copy(&file, &target)?;
+            // The copy keeps the date of the original, as `differs` compares them: Windows
+            // keeps it, Linux and macOS give the copy the time of the copy, and every file
+            // was copied again at each run.
+            if let Ok(modified) = std::fs::metadata(&file).and_then(|m| m.modified()) {
+                std::fs::File::options()
+                    .write(true)
+                    .open(&target)
+                    .and_then(|f| f.set_modified(modified))?;
+            }
         }
     }
     Ok(())
