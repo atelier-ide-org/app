@@ -14,8 +14,12 @@ Dans `package.json`, Ctrl+Espace dans la version d'une dépendance propose ses v
 
 Le serveur MCP peut être déclaré une fois **pour tous les projets**, dans la configuration de l'utilisateur (celle de la distribution pour un projet WSL) : plus de `.mcp.json` dans chaque projet. La barre d'état indique WSL devant le chemin d'un projet qui vit dans une distribution.
 
+Le serveur MCP a des **contrôles de qualité** pour le code TypeScript, JavaScript et Rust : `crapper` (score CRAP de chaque fonction), `dryer` (fonctions dupliquées), `verifier` (fonctions à fusionner dans leur unique appelant) et `mutator` (test par mutation, dans des copies du projet) ; `checker` lance les trois premiers, `cleaner` les quatre. Chacun est aussi une commande de l'agent (`/mcp__atelier__checker`…) qui corrige ce qu'il trouve. Une analyse en cours s'affiche dans la barre d'état, avec un bouton pour la mettre en pause.
+
 Sur un disque lent, comme un partage WSL, la fenêtre ne se fige plus : les dates des fichiers, le parcours du projet, la liste des fichiers, les erreurs de syntaxe, les symboles et le texte de Git sont lus en arrière-plan, et la liste des fichiers d'un gros projet est bien plus rapide.
 
 Dans le terminal, Ctrl+C interrompt de nouveau, et un clic droit sur une sélection la copie. Valider une suppression déjà indexée dans Git n'échoue plus.
 
 L'aperçu Markdown ne plante plus sur un bloc HTML suivi d'une lettre accentuée, et dispose ces blocs comme écrits (lignes centrées, tableaux, tailles des images, images du web). Les fichiers `.mts` et `.cts` sont du TypeScript. Les barres de défilement sont fines et translucides.
+
+Les dépendances passent à egui 0.37 (toujours avec le rendu OpenGL, qu'utilisent les plugins natifs), resvg 0.49, quick-xml 0.42, sysinfo 0.40 et vt100 0.18.
