@@ -146,6 +146,7 @@ fn probe_big_json_scroll() {
 /// `Start-Process -NoNewWindow` is not enough; the launcher's CREATE_NEW_PROCESS_GROUP is.
 #[test]
 #[ignore]
+#[cfg(windows)]
 fn probe_terminal_interrupt() {
     use crate::terminal::{Shell, Terminal};
     let shell = Shell {
@@ -240,9 +241,9 @@ fn probe_tab_switch() {
     };
     // Every tab seen once, then switched to again: the second round is what a user feels.
     for round in 0..2 {
-        for i in 0..files.len() {
+        for (i, file) in files.iter().enumerate() {
             ide.active = i;
-            let mut line = format!("tour {round} {:<45}", files[i]);
+            let mut line = format!("tour {round} {file:<45}");
             for n in 0..4 {
                 let (total, (s, l, e), tess) = frame(&mut ide);
                 if n == 0 {
