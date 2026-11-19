@@ -30,7 +30,7 @@ eframe = { version = "0.37", default-features = false, features = [
 egui_extras = { version = "0.37", features = ["syntect", "svg", "svg_text", "image", "file", "http"] }
 # Draws the SVG of a diagram (the renderer gives text, not a tree of its own resvg) and the badges
 # of a README, with the fonts of the system.
-resvg = { version = "0.49", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
+resvg = { version = "0.50", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
 mermaid-rs-renderer = { version = "0.3", default-features = false, features = ["png"] }
 egui_commonmark = { version = "0.26", features = ["better_syntax_highlighting", "svg"] }
 # The parser of egui_commonmark: where the HTML of a Markdown document is.
