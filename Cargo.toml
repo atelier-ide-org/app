@@ -38,7 +38,7 @@ pulldown-cmark = { version = "0.13", default-features = false }
 # The name of an installed font and whether it is monospaced.
 ttf-parser = "0.25"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
-rfd = "0.17"
+rfd = "0.18"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 portable-pty = "0.9"
