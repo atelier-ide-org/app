@@ -217,7 +217,8 @@ impl WebPlugin {
     }
 
     /// The address bar and the buttons of a page.
-    fn toolbar(page: &mut Page, ui: &mut egui::Ui) {
+    /// `switch`: the layout switch of the editor floats at the right end of the bar.
+    fn toolbar(page: &mut Page, ui: &mut egui::Ui, switch: bool) {
         let (url, title, loading) = {
             let shared = page.shared.borrow();
             (shared.url.clone(), shared.title.clone(), shared.loading)
@@ -251,7 +252,10 @@ impl WebPlugin {
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.add_space(4.0);
+                ui.add_space(match switch {
+                    true => 3.0 * ui::BUTTON + 6.0 + 30.0,
+                    false => 4.0,
+                });
                 if ui::icon_button(ui, "debug", tr!("web.devtools")).clicked()
                     && let Some(view) = view
                 {
@@ -442,9 +446,9 @@ impl BuiltinPlugin for WebPlugin {
         });
         page.drawn = true;
         ui.add_space(4.0);
-        Self::toolbar(page, ui);
+        Self::toolbar(page, ui, !is_shortcut(path));
         ui.add_space(4.0);
-        let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+        let (mut rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
         // The web view is a child of the main window: a tab in a window of its own shows a
         // notice instead.
         let message = if ui.ctx().viewport_id() != egui::ViewportId::ROOT {
@@ -480,7 +484,14 @@ impl BuiltinPlugin for WebPlugin {
         let Some(view) = &mut page.view else {
             return;
         };
-        if self.covers.iter().any(|cover| cover.intersects(rect)) {
+        // What floats over the top of the page, as the layout switch of the editor: the page
+        // starts under it. Anything else over it (a menu, the palette) hides it meanwhile.
+        for cover in &self.covers {
+            if cover.intersects(rect) && cover.top() <= rect.top() + 24.0 {
+                rect.min.y = rect.min.y.max(cover.bottom() + 1.0);
+            }
+        }
+        if rect.height() < 24.0 || self.covers.iter().any(|cover| cover.intersects(rect)) {
             view.hide();
         } else {
             let ppp = ui.ctx().pixels_per_point();
