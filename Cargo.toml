@@ -74,7 +74,7 @@ spellbook = "0.4.2"
 raw-window-handle = "0.6"
 tree-sitter-python = "0.25"
 # Native plugins: the dynamic libraries of `.atelier/plugins`, and the interface they implement.
-libloading = "0.8"
+libloading = "0.9"
 # The interface of the native plugins (the submodule `api/`): C types, and the messages.
 atelier-plugin-api = { path = "api", default-features = false, features = ["serde"] }
 # The YAML plugin: checks a reformat kept the data, and converts YAML to JSON.
