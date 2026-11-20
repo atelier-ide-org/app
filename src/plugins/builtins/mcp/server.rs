@@ -390,7 +390,7 @@ fn handle(
                 "instructions": "Outils de l'IDE Atelier : fichiers ouverts, éditeur actif, problèmes du code, recherche dans le projet, ouverture d'un fichier à une ligne. \
                     Atelier garde le contexte de cette session dans le projet : au début, note l'objectif avec session_note (kind goal), \
                     puis les décisions (decision), les tâches restantes (todo) et l'avancement (progress). Une autre IA pourra reprendre la session à partir de ces notes (get_session_context). \
-                    If the project's context graph is on, read graph_overview then ask graph_query / graph_node before opening many files: it costs far fewer tokens."
+                    If the project's context graph is on, read graph_overview then ask graph_query / graph_node before opening many files: it costs far fewer tokens.                     The Web viewer of the IDE is a browser you drive with the web_* tools: web_open a page, web_snapshot it to see its numbered elements, web_click / web_type them by ref,                     web_read its text, web_eval JavaScript, web_console its logs and web_screenshot to see it."
             })
         }
         "ping" => json!({}),
@@ -478,7 +478,15 @@ fn handle(
                 Ok(text) => (text, false),
                 Err(text) => (text, true),
             };
-            json!({"content": [{"type": "text", "text": text}], "isError": is_error})
+            // A picture of the Web viewer goes as an image, with its line of text.
+            let content = match crate::plugins::builtins::web::remote::split_image(&text) {
+                Some((data, line)) if !is_error => json!([
+                    {"type": "image", "data": data, "mimeType": "image/png"},
+                    {"type": "text", "text": line},
+                ]),
+                _ => json!([{"type": "text", "text": text}]),
+            };
+            json!({"content": content, "isError": is_error})
         }
         _ => {
             return (

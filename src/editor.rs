@@ -2597,6 +2597,15 @@ impl EditorState {
                     if row_index >= 0.0 && (row_index as usize) < self.row_count() {
                         let line = self.line_at(row_index as usize);
                         let local_x = pos.x - origin.x - viewport.min.x;
+                        // The bulb of the caret line: its fixes, and no selection of the line.
+                        if opt.assist.is_some()
+                            && self.bulb().is_some_and(|(l, _)| l == line)
+                            && (marks_x..marks_x + 10.0).contains(&local_x)
+                        {
+                            self.open_line_fixes();
+                            self.fold_press = true;
+                            response.request_focus();
+                        }
                         if let Some((open, head_end)) =
                             self.region_at(line).map(|r| (r.open, r.head_end))
                         {
@@ -2970,6 +2979,7 @@ impl EditorState {
                 // The change under the mouse, to show what its lines were.
                 let mut change_tip: Option<(MarkKind, std::sync::Arc<str>)> = None;
                 let gutter_hot = hover_pos.is_some_and(|p| visible.contains(p));
+                let bulb = opt.assist.as_ref().and_then(|_| self.bulb());
                 for shown in first..last {
                     let index = self.line_at(shown);
                     let y = origin.y + shown as f32 * row;
@@ -2979,6 +2989,16 @@ impl EditorState {
                             0.0,
                             t.caret_row,
                         );
+                    }
+                    if let Some((_, severity)) = bulb.filter(|(l, _)| *l == index) {
+                        let center = pos2(left + marks_x + 5.0, y + row / 2.0);
+                        paint_bulb(&painter, center, assist::severity_color(severity));
+                        let zone = Rect::from_center_size(center, vec2(10.0, row));
+                        let tip = ui.interact(zone, id.with("bulb"), egui::Sense::hover());
+                        if tip.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        tip.on_hover_text(tr!("show_fixes"));
                     }
                     if let Some(open) = self.region_at(index).map(|r| r.open) {
                         let folded = self.folded.contains(&open);
@@ -3164,6 +3184,16 @@ mod multi_tests;
 #[cfg(test)]
 #[path = "../test/editor/hints_tests.rs"]
 mod hints_tests;
+
+/// A bulb, as IntelliJ shows on a line with fixes: its glass, and its base under it.
+fn paint_bulb(painter: &egui::Painter, center: Pos2, color: Color32) {
+    painter.circle_filled(center - vec2(0.0, 1.5), 3.6, color);
+    painter.rect_filled(
+        Rect::from_min_max(center + vec2(-1.8, 2.2), center + vec2(1.8, 4.2)),
+        0.5,
+        color.gamma_multiply(0.8),
+    );
+}
 
 #[cfg(test)]
 #[path = "../test/editor/context_tests.rs"]

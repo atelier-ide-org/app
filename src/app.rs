@@ -400,6 +400,8 @@ enum Target {
     Line(usize, usize),
     Action(usize),
     Builtin(&'static str, &'static str),
+    /// An entry a plugin offers for the text typed, with that text.
+    Query(&'static str, &'static str, String),
     Tab(usize),
     File(PathBuf),
     /// A 0-based line of a file: a symbol.
@@ -609,6 +611,8 @@ pub struct Ide {
     tree_drop_next: Option<PathBuf>,
     /// Folder the dragged entry hovers and since when: it opens after a short delay.
     tree_hover: Option<(PathBuf, Instant)>,
+    /// Files last dragged out of the window, and when: dropped back on it, they are not opened.
+    dragged_out: Option<(Vec<PathBuf>, Instant)>,
     scroll_to_selected: bool,
     doc_drag: Option<usize>,
 
@@ -886,6 +890,7 @@ impl Ide {
             new_name: String::new(),
             tree_dialog: None,
             tree_drag: None,
+            dragged_out: None,
             tree_drop: None,
             tree_drop_next: None,
             tree_hover: None,
@@ -955,6 +960,7 @@ impl Ide {
             // The folder of a file given on the command line: read, never written.
             ide.load_project_plugins(false);
         }
+        crate::window::remember_main(cc);
         ide.window = crate::window::Window::new(cc);
         if let Some(window) = &mut ide.window {
             let size = if start_screen {
@@ -3565,6 +3571,31 @@ impl Ide {
 
     /// Ends a drag in the tree: moves the entry into the folder it was dropped on.
     fn finish_tree_drag(&mut self, ctx: &egui::Context) {
+        // Out of the window, the drag goes on as one of the system: the desktop, a folder of
+        // Explorer or a web page receives copies of the files.
+        if self.tree_drag.is_some()
+            && ctx.input(|i| {
+                i.pointer.primary_down()
+                    && i.pointer
+                        .latest_pos()
+                        .is_none_or(|p| !i.content_rect().contains(p))
+            })
+            && let Some(window) = &self.window
+        {
+            let mut set = std::mem::take(&mut self.tree_drag_set);
+            if set.is_empty() {
+                set.extend(self.tree_drag.clone());
+            }
+            self.tree_drag = None;
+            self.tree_drop = None;
+            self.tree_drop_next = None;
+            self.tree_hover = None;
+            if window.drag_files(&set) {
+                let set = set.iter().map(|p| project::simplify(p)).collect();
+                self.dragged_out = Some((set, Instant::now()));
+            }
+            return;
+        }
         if let Some(from) = &self.tree_drag
             && let Some(pointer) = ctx.pointer_interact_pos()
         {
@@ -5345,17 +5376,16 @@ impl Ide {
                 }
                 let font = FontId::monospace(self.settings.font_size);
                 let annotations = gutter.annotations.as_deref();
-                let assist = self
-                    .languages
-                    .formats(&doc.language)
-                    .then(|| crate::editor::Assist {
+                let assist = self.languages.assists(&doc.path, &doc.language).then(|| {
+                    crate::editor::Assist {
                         service: &self.languages,
                         doc: crate::languages::DocRef {
                             key: doc_key(&doc.path, self.active),
                             path: doc.path.clone(),
                             language: doc.language.clone(),
                         },
-                    });
+                    }
+                });
                 let bookmark_lines = Ide::bookmark_lines(
                     &mut self.bookmarks,
                     &mut self.bookmark_rev,
@@ -6607,6 +6637,25 @@ impl Ide {
         }
         let everywhere = self.palette_mode == PaletteMode::Everywhere;
         let mut hits = Vec::new();
+        let typed = self.palette_query.trim();
+        for plugin in self
+            .builtins
+            .iter()
+            .filter(|_| everywhere && !typed.is_empty())
+        {
+            if !self.builtin_enabled(plugin.id()) {
+                continue;
+            }
+            for command in plugin.query_commands(typed) {
+                hits.push(Hit {
+                    label: command.label,
+                    hint: String::new(),
+                    icon: Some(plugin.icon()),
+                    file: None,
+                    target: Target::Query(plugin.id(), command.id, typed.to_string()),
+                });
+            }
+        }
         for (i, doc) in self.documents.iter().enumerate().filter(|_| everywhere) {
             if doc.title().to_lowercase().contains(&query) {
                 hits.push(Hit {
@@ -6931,6 +6980,11 @@ impl Ide {
             match target {
                 Target::Action(index) => self.perform_action(index),
                 Target::Builtin(plugin, command) => self.run_builtin_command(plugin, command),
+                Target::Query(plugin, command, query) => self.each_builtin(|p, ide| {
+                    if p.id() == plugin {
+                        p.run_query_command(command, &query, ide);
+                    }
+                }),
                 Target::Tab(index) => self.active = index,
                 Target::File(path) => self.open_file(path),
                 Target::Line(line, column) => self.go_to_line(line, column),
@@ -7412,7 +7466,8 @@ impl Ide {
         }
     }
 
-    /// Gives the language service the formatters and the JSON schemas of the plugins that are on.
+    /// Gives the language service the formatters, the JSON schemas, the linters and the formatters
+    /// of files of the plugins that are on.
     fn sync_plugin_languages(&self) {
         let on = || {
             self.builtins
@@ -7423,6 +7478,8 @@ impl Ide {
             .set_formatters(on().flat_map(|p| p.formatters().iter().copied()).collect());
         self.languages
             .set_json_schemas(on().flat_map(|p| p.json_schemas()).collect());
+        self.languages
+            .set_externals(on().filter_map(|p| p.language_tools()).collect());
     }
 
     fn dropped_files(&mut self, ctx: &egui::Context) {
@@ -7433,6 +7490,15 @@ impl Ide {
                 .map(|f| f.path().to_path_buf())
                 .collect()
         });
+        // Files of the project dragged out and back in: given up, rather than opened.
+        let ours = |path: &PathBuf| {
+            self.dragged_out.as_ref().is_some_and(|(set, when)| {
+                when.elapsed() < Duration::from_secs(2) && set.contains(&project::simplify(path))
+            })
+        };
+        if !dropped.is_empty() && dropped.iter().all(ours) {
+            return;
+        }
         for path in dropped {
             if path.is_dir() {
                 self.open_project(path);
@@ -7555,6 +7621,9 @@ struct Gutter {
 }
 
 impl Host for Ide {
+    fn search_everywhere(&mut self) {
+        self.open_palette();
+    }
     fn root(&self) -> &Path {
         &self.root
     }
@@ -7611,7 +7680,7 @@ impl Host for Ide {
         let mut out = Vec::new();
         for (index, doc) in self.documents.iter().enumerate() {
             let Some(path) = &doc.path else { continue };
-            if !self.languages.handles(&doc.language) {
+            if !self.languages.assists(&doc.path, &doc.language) {
                 continue;
             }
             let reference = crate::languages::DocRef {

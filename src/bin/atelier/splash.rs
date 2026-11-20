@@ -16,9 +16,13 @@ use std::{
 };
 
 /// The card, and around it the room of its shadow: the window has no frame, and a transparent
-/// window gets no shadow from the system.
+/// window gets no shadow from the system. Windows 11 gives one all the same, with its rounded
+/// corners and its border, and keeps the window opaque: there, the window is the card, and the
+/// system draws the shadow.
 const CARD: [f32; 2] = [300.0, 340.0];
-const SHADOW_ROOM: f32 = 24.0;
+const SHADOW_ROOM: f32 = if cfg!(windows) { 0.0 } else { 24.0 };
+/// The radius of the corners of Windows 11, so that the card fills them.
+const CORNER: u8 = if cfg!(windows) { 8 } else { 12 };
 const SIZE: [f32; 2] = [CARD[0] + 2.0 * SHADOW_ROOM, CARD[1] + 2.0 * SHADOW_ROOM];
 const BACKGROUND: Color32 = Color32::from_rgb(0x1E, 0x1F, 0x22);
 const TEXT: Color32 = Color32::from_rgb(0xDF, 0xE1, 0xE5);
@@ -143,21 +147,24 @@ impl eframe::App for Splash {
             opacity = 1.0 - (since / FADE) as f32;
             ctx.request_repaint();
         }
-        let frame = egui::Frame::new()
+        let mut frame = egui::Frame::new()
             .fill(BACKGROUND.gamma_multiply(opacity))
-            .corner_radius(12)
+            .corner_radius(CORNER)
             .inner_margin(24)
-            .outer_margin(SHADOW_ROOM)
-            .stroke(egui::Stroke::new(
-                1.0_f32,
-                Color32::from_white_alpha(14).gamma_multiply(opacity),
-            ))
-            .shadow(egui::epaint::Shadow {
-                offset: [0, 6],
-                blur: 22,
-                spread: 0,
-                color: Color32::from_black_alpha((110.0 * opacity) as u8),
-            });
+            .outer_margin(SHADOW_ROOM);
+        if SHADOW_ROOM > 0.0 {
+            frame = frame
+                .stroke(egui::Stroke::new(
+                    1.0_f32,
+                    Color32::from_white_alpha(14).gamma_multiply(opacity),
+                ))
+                .shadow(egui::epaint::Shadow {
+                    offset: [0, 6],
+                    blur: 22,
+                    spread: 0,
+                    color: Color32::from_black_alpha((110.0 * opacity) as u8),
+                });
+        }
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             ui.set_opacity(opacity);
             // No title bar: the whole window moves it.

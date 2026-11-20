@@ -24,6 +24,9 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, LazyLock, Mutex},
 };
+use tools::NativeTools;
+
+mod tools;
 
 /// The libraries loaded, by file.
 static LOADED: LazyLock<Mutex<HashMap<PathBuf, &'static abi::PluginApi>>> =
@@ -63,8 +66,12 @@ pub fn load(manifest: &Manifest) -> Result<NativePlugin, String> {
         extensions: manifest.extensions.clone(),
         surfaces: HashMap::new(),
         ctx: None,
+        tools: None,
     };
     plugin.refresh_info();
+    let lints_or_formats = !plugin.info.lints.is_empty() || !plugin.info.formats.is_empty();
+    plugin.tools =
+        lints_or_formats.then(|| Arc::new(NativeTools::new(plugin.instance.clone(), &plugin.info)));
     Ok(plugin)
 }
 
@@ -148,6 +155,8 @@ struct Shared {
     project: Mutex<protocol::Project>,
     /// The look of the IDE, as JSON, with its generation.
     style: Mutex<(u64, Vec<u8>)>,
+    /// The problems and the formatted texts the plugin sent back.
+    published: tools::Published,
 }
 
 impl Shared {
@@ -188,6 +197,20 @@ impl Shared {
                 .ok()
                 .and_then(|r| rasterize(r.svg.as_bytes(), r.width, r.height))
                 .unwrap_or_default(),
+            protocol::DIAGNOSTICS => {
+                if let Ok(found) = serde_json::from_slice::<protocol::Diagnostics>(input) {
+                    self.published.diagnostics(found);
+                    self.repaint();
+                }
+                Vec::new()
+            }
+            protocol::FORMATTED => {
+                if let Ok(answer) = serde_json::from_slice::<protocol::FormatAnswer>(input) {
+                    self.published.formatted(answer);
+                    self.repaint();
+                }
+                Vec::new()
+            }
             _ => Vec::new(),
         }
     }
@@ -397,6 +420,8 @@ pub struct NativePlugin {
     extensions: Vec<String>,
     surfaces: HashMap<(u32, String), Surface>,
     ctx: Option<egui::Context>,
+    /// Its linters and formatters, when it has any.
+    tools: Option<Arc<NativeTools>>,
 }
 
 impl NativePlugin {
@@ -1087,6 +1112,11 @@ impl BuiltinPlugin for NativePlugin {
     }
     fn external(&self) -> bool {
         true
+    }
+    fn language_tools(&self) -> Option<Arc<dyn crate::languages::external::External>> {
+        self.tools
+            .clone()
+            .map(|tools| tools as Arc<dyn crate::languages::external::External>)
     }
     fn tool_windows(&self) -> &'static [ToolWindow] {
         self.tool_windows

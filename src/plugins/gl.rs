@@ -21,7 +21,7 @@ fn open(names: &[&str]) -> Option<libloading::Library> {
     // SAFETY: system libraries, already loaded by eframe in practice.
     names
         .iter()
-        .find_map(|name| unsafe { libloading::Library::new(name) }.ok())
+        .find_map(|&name| unsafe { libloading::Library::new(name) }.ok())
 }
 
 fn symbol<T: Copy>(library: &libloading::Library, name: &[u8]) -> Option<T> {
