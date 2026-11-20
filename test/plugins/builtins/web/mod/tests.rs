@@ -67,3 +67,37 @@ fn html_files_show_their_page_on_demand_and_shortcuts_always() {
     assert!(plugin.opens_binary(shortcut) && !plugin.layout_switch(shortcut));
     assert_eq!(plugin.editor_layout(Path::new("a.css")), None);
 }
+
+#[test]
+fn search_everywhere_offers_to_open_addresses_not_file_names() {
+    for query in [
+        "https://docs.rs",
+        "www.rust-lang.org",
+        "example.com",
+        "github.com/atelier-ide-org",
+        "localhost:3000",
+        "192.168.1.10",
+    ] {
+        assert!(looks_like_address(query), "{query}");
+    }
+    for query in [
+        "main.rs",
+        "app.json",
+        "index.html",
+        "README.md",
+        "egui",
+        "rust egui",
+        "",
+    ] {
+        assert!(!looks_like_address(query), "{query}");
+    }
+    let plugin = WebPlugin::default();
+    let entries = plugin.query_commands("example.com");
+    assert_eq!(entries.len(), 1);
+    assert!(
+        entries[0].label.contains("https://example.com"),
+        "{}",
+        entries[0].label
+    );
+    assert!(plugin.query_commands("main.rs").is_empty());
+}

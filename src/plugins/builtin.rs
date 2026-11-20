@@ -160,6 +160,8 @@ pub trait Host {
     fn open_at(&mut self, path: PathBuf, _line: usize, _column: usize, _length: usize) {
         self.open_file(path);
     }
+    /// Opens Search Everywhere, as a double Shift does (from a web page, which keeps the keys).
+    fn search_everywhere(&mut self) {}
     /// Asks to switch projects; unsaved documents are confirmed first.
     fn open_project(&mut self, path: PathBuf);
     /// Saves the modified documents that have a path. False if one could not be saved.
@@ -241,6 +243,12 @@ pub trait BuiltinPlugin {
         Vec::new()
     }
     fn run_command(&mut self, id: &str, host: &mut dyn Host) {}
+    /// Entries of Search Everywhere for what is typed there (an address to open), first.
+    fn query_commands(&self, query: &str) -> Vec<Command> {
+        Vec::new()
+    }
+    /// An entry of [`BuiltinPlugin::query_commands`] was chosen for `query`.
+    fn run_query_command(&mut self, id: &str, query: &str, host: &mut dyn Host) {}
     fn file_color(&self, path: &Path) -> Option<Color32> {
         None
     }

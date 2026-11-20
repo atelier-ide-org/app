@@ -5,6 +5,7 @@
   "web.forward": "Suivant",
   "web.html_page": "Web : page du fichier HTML à côté de sa source",
   "web.main_window_only": "Les pages web s'affichent dans la fenêtre principale de l'IDE.",
+  "web.open_address": "Ouvrir {url} dans le visualiseur web",
   "web.open_html_file": "Ouvrez un fichier HTML",
   "web.open_in_browser": "Ouvrir dans le navigateur du système",
   "web.open_in_viewer": "Ouvrir dans le visualiseur web",

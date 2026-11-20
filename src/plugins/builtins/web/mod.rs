@@ -26,6 +26,8 @@ pub struct Shared {
     pub loading: bool,
     /// Pages it asked to open in a new window: they open in new tabs.
     pub new_windows: Vec<String>,
+    /// A double Shift in the page: Search Everywhere opens.
+    pub search: bool,
 }
 
 struct Page {
@@ -139,6 +141,40 @@ pub fn address(input: &str) -> String {
     }
 }
 
+/// Whether what was typed in Search Everywhere is an address rather than a name to look for:
+/// with its scheme, `www.`, a port, or a site with a known ending (`docs.rs` is a file of a
+/// project as much as a site: it needs its scheme).
+pub fn looks_like_address(query: &str) -> bool {
+    let query = query.trim();
+    let lower = query.to_ascii_lowercase();
+    if query.is_empty() || query.contains(char::is_whitespace) {
+        return false;
+    }
+    if ["http://", "https://", "www."]
+        .iter()
+        .any(|start| lower.starts_with(start))
+    {
+        return true;
+    }
+    let target = address(query);
+    if !target.starts_with("http") || target.starts_with("https://duckduckgo.com/?q=") {
+        return false;
+    }
+    let host = lower.split(['/', '?', '#']).next().unwrap_or_default();
+    if host.starts_with("localhost") || host.contains(':') {
+        return true;
+    }
+    const SITES: &[&str] = &[
+        "com", "org", "net", "io", "dev", "app", "fr", "de", "uk", "eu", "co", "ai", "gov", "edu",
+        "info", "be", "ch", "ca", "es", "it", "nl", "jp", "us", "me", "tv", "xyz",
+    ];
+    let ip = host.split('.').count() == 4 && host.split('.').all(|n| n.parse::<u8>().is_ok());
+    ip || host
+        .rsplit('.')
+        .next()
+        .is_some_and(|ending| SITES.contains(&ending))
+}
+
 fn search(words: &str) -> String {
     let mut query = String::new();
     for byte in words.bytes() {
@@ -208,6 +244,37 @@ fn new_page(url: &str) -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
+/// The tooltip of a widget of the address bar, above it: under it, the page would hide it, as
+/// egui draws under the web view. Leaning right of the widget, or left of it (`left`).
+fn tip(response: egui::Response, text: &str, left: bool) -> egui::Response {
+    if !response.hovered() || text.is_empty() {
+        return response;
+    }
+    let ctx = response.ctx.clone();
+    let still = ctx.input(|i| i.pointer.time_since_last_movement());
+    if still < 0.5 {
+        ctx.request_repaint_after_secs(0.5 - still);
+        return response;
+    }
+    let rect = response.rect;
+    let (pivot, at) = match left {
+        true => (egui::Align2::RIGHT_BOTTOM, rect.right_top()),
+        false => (egui::Align2::LEFT_BOTTOM, rect.left_top()),
+    };
+    egui::Area::new(response.id.with("tip_above"))
+        .order(Order::Tooltip)
+        .pivot(pivot)
+        .fixed_pos(at - egui::vec2(0.0, 4.0))
+        .interactable(false)
+        .show(&ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_max_width(360.0);
+                ui.label(text);
+            });
+        });
+    response
+}
+
 impl WebPlugin {
     fn open_page(&mut self, url: &str, host: &mut dyn Host) {
         match new_page(url) {
@@ -228,21 +295,31 @@ impl WebPlugin {
             let view = page.view.as_ref();
             let back = view.is_some_and(|v| v.can_go_back());
             let forward = view.is_some_and(|v| v.can_go_forward());
-            if ui::icon_button_enabled(ui, "arrowLeft", back, tr!("web.back")).clicked()
+            if tip(
+                ui::icon_button_enabled(ui, "arrowLeft", back, ""),
+                tr!("web.back"),
+                false,
+            )
+            .clicked()
                 && let Some(view) = view
             {
                 view.back();
             }
-            if ui::icon_button_enabled(ui, "arrowRight", forward, tr!("web.forward")).clicked()
+            if tip(
+                ui::icon_button_enabled(ui, "arrowRight", forward, ""),
+                tr!("web.forward"),
+                false,
+            )
+            .clicked()
                 && let Some(view) = view
             {
                 view.forward();
             }
-            let (icon, tip) = match loading {
+            let (icon, tip_text) = match loading {
                 true => ("stop", tr!("web.stop")),
                 false => ("refresh", tr!("web.reload")),
             };
-            if ui::icon_button(ui, icon, tip).clicked()
+            if tip(ui::icon_button(ui, icon, ""), tip_text, false).clicked()
                 && let Some(view) = view
             {
                 match loading {
@@ -256,12 +333,18 @@ impl WebPlugin {
                     true => 3.0 * ui::BUTTON + 6.0 + 30.0,
                     false => 4.0,
                 });
-                if ui::icon_button(ui, "debug", tr!("web.devtools")).clicked()
+                if tip(ui::icon_button(ui, "debug", ""), tr!("web.devtools"), true).clicked()
                     && let Some(view) = view
                 {
                     view.devtools();
                 }
-                if ui::icon_button(ui, "openNewTab", tr!("web.open_in_browser")).clicked() {
+                if tip(
+                    ui::icon_button(ui, "openNewTab", ""),
+                    tr!("web.open_in_browser"),
+                    true,
+                )
+                .clicked()
+                {
                     ui.ctx().open_url(egui::OpenUrl::new_tab(&page.address));
                 }
                 let field = ui.add(
@@ -271,7 +354,7 @@ impl WebPlugin {
                 );
                 let field = match title.is_empty() {
                     true => field,
-                    false => field.on_hover_text(&title),
+                    false => tip(field, &title, false),
                 };
                 if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     let target = address(&page.address);
@@ -329,6 +412,22 @@ impl BuiltinPlugin for WebPlugin {
         }
     }
 
+    fn query_commands(&self, query: &str) -> Vec<Command> {
+        match looks_like_address(query) {
+            true => vec![Command {
+                id: "web.open_query",
+                label: trf!("web.open_address", url = address(query)),
+            }],
+            false => Vec::new(),
+        }
+    }
+
+    fn run_query_command(&mut self, id: &str, query: &str, host: &mut dyn Host) {
+        if id == "web.open_query" {
+            self.open_page(&address(query), host);
+        }
+    }
+
     fn tree_commands(&self, paths: &[PathBuf]) -> Vec<Command> {
         match paths {
             [path] if is_html(path) => vec![Command {
@@ -357,6 +456,7 @@ impl BuiltinPlugin for WebPlugin {
         // A click in the window: the keyboard comes back to it from the page.
         let pressed = ctx.input(|i| i.pointer.any_pressed());
         let mut opened = Vec::new();
+        let mut search = false;
         for (path, page) in &mut self.pages {
             if let Some(view) = &mut page.view {
                 if !page.drawn {
@@ -369,6 +469,12 @@ impl BuiltinPlugin for WebPlugin {
             page.drawn = false;
             let mut shared = page.shared.borrow_mut();
             opened.append(&mut shared.new_windows);
+            if std::mem::take(&mut shared.search) {
+                search = true;
+                if let Some(view) = &page.view {
+                    view.release_keyboard();
+                }
+            }
             // A page of the IDE opens again where it was left.
             if own_page(path)
                 && !shared.loading
@@ -381,6 +487,9 @@ impl BuiltinPlugin for WebPlugin {
         }
         for url in opened {
             self.open_page(&url, host);
+        }
+        if search {
+            host.search_everywhere();
         }
     }
 

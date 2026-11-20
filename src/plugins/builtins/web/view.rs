@@ -6,6 +6,22 @@ use super::Shared;
 use eframe::egui;
 use std::{cell::RefCell, rc::Rc};
 
+/// Tells the IDE of a double Shift (two Shifts alone within 450 ms), which it reads itself
+/// elsewhere.
+#[cfg(any(windows, target_os = "macos"))]
+const DOUBLE_SHIFT: &str = r#"(() => {
+  let last = 0, alone = false;
+  addEventListener('keydown', e => {
+    alone = e.key === 'Shift' && !e.repeat && !e.ctrlKey && !e.altKey && !e.metaKey;
+    if (e.key !== 'Shift') last = 0;
+  }, true);
+  addEventListener('keyup', e => {
+    if (e.key !== 'Shift' || !alone) return;
+    const now = Date.now();
+    if (now - last < 450) { last = 0; window.ipc.postMessage('atelier:search'); } else last = now;
+  }, true);
+})();"#;
+
 /// The browser engine: its profile (cookies, cache, storage) is the IDE's, in its data folder.
 #[derive(Default)]
 pub struct Engine {
@@ -40,7 +56,8 @@ impl Engine {
             });
             let loads = (shared.clone(), ctx.clone());
             let titles = (shared.clone(), ctx.clone());
-            let windows = (shared, ctx.clone());
+            let windows = (shared.clone(), ctx.clone());
+            let search = (shared, ctx.clone());
             let web = wry::WebViewBuilder::new_with_web_context(context)
                 .with_url(url)
                 .with_visible(false)
@@ -61,6 +78,15 @@ impl Engine {
                     windows.0.borrow_mut().new_windows.push(url);
                     windows.1.request_repaint();
                     wry::NewWindowResponse::Deny
+                })
+                // A double Shift in the page opens Search Everywhere, as in the rest of the IDE:
+                // the page keeps the keys it is given.
+                .with_initialization_script(DOUBLE_SHIFT)
+                .with_ipc_handler(move |request| {
+                    if request.body() == "atelier:search" {
+                        search.0.borrow_mut().search = true;
+                        search.1.request_repaint();
+                    }
                 })
                 .build_as_child(&parent)
                 .map_err(|e| e.to_string())?;

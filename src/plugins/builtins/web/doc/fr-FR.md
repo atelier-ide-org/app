@@ -5,7 +5,7 @@ summary: Les pages web dans l'éditeur, comme dans un navigateur, et la page d'u
 
 # Visualiseur web
 
-**Web : ouvrir une page** (dans la palette) ouvre un onglet de navigateur : une barre d'adresse, les boutons précédent, suivant et recharger, les outils de développement, et un bouton qui ouvre la page dans le navigateur du système. Dans la barre, une adresse sans `https://` suffit (`localhost:3000` passe en HTTP), un chemin ouvre le fichier, et des mots lancent une recherche. Un lien qui ouvre une nouvelle fenêtre ouvre un nouvel onglet.
+**Web : ouvrir une page** (dans la palette) ouvre un onglet de navigateur : une barre d'adresse, les boutons précédent, suivant et recharger, les outils de développement, et un bouton qui ouvre la page dans le navigateur du système. Dans la barre, une adresse sans `https://` suffit (`localhost:3000` passe en HTTP), un chemin ouvre le fichier, et des mots lancent une recherche. Un lien qui ouvre une nouvelle fenêtre ouvre un nouvel onglet. Une adresse tapée dans **Rechercher partout** (Maj Maj) propose de l'ouvrir dans le visualiseur, et Maj Maj marche aussi depuis la page.
 
 Une page est un fichier `.url`, un raccourci Internet comme Windows en fait : ceux du projet s'ouvrent aussi dans le visualiseur. Une page ouverte depuis la palette rouvre là où elle en était au démarrage suivant, et disparaît avec son onglet.
 

@@ -400,6 +400,8 @@ enum Target {
     Line(usize, usize),
     Action(usize),
     Builtin(&'static str, &'static str),
+    /// An entry a plugin offers for the text typed, with that text.
+    Query(&'static str, &'static str, String),
     Tab(usize),
     File(PathBuf),
     /// A 0-based line of a file: a symbol.
@@ -6635,6 +6637,25 @@ impl Ide {
         }
         let everywhere = self.palette_mode == PaletteMode::Everywhere;
         let mut hits = Vec::new();
+        let typed = self.palette_query.trim();
+        for plugin in self
+            .builtins
+            .iter()
+            .filter(|_| everywhere && !typed.is_empty())
+        {
+            if !self.builtin_enabled(plugin.id()) {
+                continue;
+            }
+            for command in plugin.query_commands(typed) {
+                hits.push(Hit {
+                    label: command.label,
+                    hint: String::new(),
+                    icon: Some(plugin.icon()),
+                    file: None,
+                    target: Target::Query(plugin.id(), command.id, typed.to_string()),
+                });
+            }
+        }
         for (i, doc) in self.documents.iter().enumerate().filter(|_| everywhere) {
             if doc.title().to_lowercase().contains(&query) {
                 hits.push(Hit {
@@ -6959,6 +6980,11 @@ impl Ide {
             match target {
                 Target::Action(index) => self.perform_action(index),
                 Target::Builtin(plugin, command) => self.run_builtin_command(plugin, command),
+                Target::Query(plugin, command, query) => self.each_builtin(|p, ide| {
+                    if p.id() == plugin {
+                        p.run_query_command(command, &query, ide);
+                    }
+                }),
                 Target::Tab(index) => self.active = index,
                 Target::File(path) => self.open_file(path),
                 Target::Line(line, column) => self.go_to_line(line, column),
@@ -7595,6 +7621,9 @@ struct Gutter {
 }
 
 impl Host for Ide {
+    fn search_everywhere(&mut self) {
+        self.open_palette();
+    }
     fn root(&self) -> &Path {
         &self.root
     }

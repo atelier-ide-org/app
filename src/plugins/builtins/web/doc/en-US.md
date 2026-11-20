@@ -5,7 +5,7 @@ summary: Web pages in the editor, as in a browser, and the page of an HTML file 
 
 # Web viewer
 
-**Web: open a page** (in the palette) opens a browser tab: an address bar, the back, forward and reload buttons, the developer tools, and a button that opens the page in the system browser. In the bar, an address without `https://` is enough (`localhost:3000` goes over HTTP), a path opens the file, and words search. A link that opens a new window opens a new tab.
+**Web: open a page** (in the palette) opens a browser tab: an address bar, the back, forward and reload buttons, the developer tools, and a button that opens the page in the system browser. In the bar, an address without `https://` is enough (`localhost:3000` goes over HTTP), a path opens the file, and words search. A link that opens a new window opens a new tab. An address typed in **Search Everywhere** (Shift Shift) offers to open it in the viewer, and Shift Shift works from the page too.
 
 A page is a `.url` file, an Internet shortcut as Windows makes them: those of the project open in the viewer too. A page opened from the palette opens again where it was at the next start, and goes away with its tab.
 
