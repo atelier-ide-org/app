@@ -12,3 +12,6 @@ Une page est un fichier `.url`, un raccourci Internet comme Windows en fait : ce
 Un fichier HTML montre sa page à côté de sa source avec le bouton d'aperçu en haut à droite de l'éditeur, ou **Web : page du fichier HTML à côté de sa source**. Elle se recharge à chaque enregistrement. **Ouvrir dans le visualiseur web**, dans le menu de l'arbre, l'ouvre dans un onglet à elle.
 
 Le visualiseur utilise le moteur web du système (WebView2 sous Windows, WebKit sous macOS), avec ses propres cookies et données, gardés par l'IDE. Il n'est pas encore disponible sous Linux. Une page s'affiche dans la fenêtre principale seulement, et se cache le temps qu'un menu ou une fenêtre flottante passe par-dessus.
+## Pour une IA
+
+Une IA branchée sur le serveur MCP de l'IDE pilote le visualiseur avec les outils `web_*` : `web_open` ouvre une page et attend son chargement, `web_snapshot` liste ses éléments visibles numérotés, que `web_click` et `web_type` utilisent, `web_read` donne son texte ou son HTML, `web_scroll` et `web_wait` la font défiler et attendent un élément, `web_eval` y exécute du JavaScript, `web_console` lit sa console et `web_screenshot` en prend une capture. `web_navigate` et `web_list_pages` complètent.

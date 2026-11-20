@@ -66,6 +66,9 @@ impl Engine {
                 .with_on_page_load_handler(move |event, url| {
                     let mut shared = loads.0.borrow_mut();
                     shared.loading = matches!(event, wry::PageLoadEvent::Started);
+                    if !shared.loading {
+                        shared.loads += 1;
+                    }
                     shared.url = url;
                     loads.1.request_repaint();
                 })
@@ -82,11 +85,15 @@ impl Engine {
                 // A double Shift in the page opens Search Everywhere, as in the rest of the IDE:
                 // the page keeps the keys it is given.
                 .with_initialization_script(DOUBLE_SHIFT)
+                // Its console, and the answers of the scripts of the MCP tools.
+                .with_initialization_script(super::remote::CONSOLE)
                 .with_ipc_handler(move |request| {
-                    if request.body() == "atelier:search" {
-                        search.0.borrow_mut().search = true;
-                        search.1.request_repaint();
+                    let mut shared = search.0.borrow_mut();
+                    match request.body().as_str() {
+                        "atelier:search" => shared.search = true,
+                        message => shared.messages.push(message.to_string()),
                     }
+                    search.1.request_repaint();
                 })
                 .build_as_child(&parent)
                 .map_err(|e| e.to_string())?;
@@ -151,6 +158,14 @@ impl View {
     pub fn release_keyboard(&self) {
         let _ = self.web.focus_parent();
     }
+    /// Runs a script in the page; what it has to say comes back through its IPC.
+    pub fn run(&self, script: &str) -> Result<(), String> {
+        self.web.evaluate_script(script).map_err(|e| e.to_string())
+    }
+    /// Where the page shows, in pixels of the window, if it does.
+    pub fn placed(&self) -> Option<[i32; 4]> {
+        self.placed
+    }
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -170,4 +185,10 @@ impl View {
     pub fn reload(&self) {}
     pub fn devtools(&self) {}
     pub fn release_keyboard(&self) {}
+    pub fn run(&self, _script: &str) -> Result<(), String> {
+        Err(tr!("web.unsupported").into())
+    }
+    pub fn placed(&self) -> Option<[i32; 4]> {
+        None
+    }
 }

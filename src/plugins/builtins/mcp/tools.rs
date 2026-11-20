@@ -211,6 +211,7 @@ pub fn specs() -> Vec<Value> {
     ]
     .into_iter()
     .chain(super::quality::specs())
+    .chain(crate::plugins::builtins::web::remote::specs())
     .collect()
 }
 

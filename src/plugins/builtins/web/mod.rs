@@ -2,6 +2,8 @@
 //! the system. A page is a tab of the editor on a `.url` file (an Internet shortcut, as Windows
 //! makes them), and an HTML file shows its page next to its source, reloaded when it is saved.
 
+pub mod remote;
+mod serve;
 mod view;
 
 use crate::{
@@ -28,6 +30,10 @@ pub struct Shared {
     pub new_windows: Vec<String>,
     /// A double Shift in the page: Search Everywhere opens.
     pub search: bool,
+    /// The pages loaded since it opened.
+    pub loads: u64,
+    /// What its scripts said through its IPC (console, answers of the MCP tools), as JSON.
+    pub messages: Vec<String>,
 }
 
 struct Page {
@@ -42,6 +48,8 @@ struct Page {
     drawn: bool,
     /// The address last written to its `.url` file.
     saved: String,
+    /// Its console: level and text, for `web_console`.
+    console: std::collections::VecDeque<(String, String)>,
 }
 
 impl Page {
@@ -54,6 +62,7 @@ impl Page {
             view: None,
             error: None,
             drawn: false,
+            console: Default::default(),
         }
     }
 }
@@ -66,6 +75,12 @@ pub struct WebPlugin {
     layouts: HashMap<PathBuf, EditorLayout>,
     /// The floating windows and menus of the last frame: a web view over them would hide them.
     covers: Vec<Rect>,
+    /// The calls of the MCP tools waiting for their page.
+    pending: Vec<serve::Pending>,
+    /// The number of the last script of a tool, to match its answer.
+    next_id: u64,
+    /// The page a tool last used: the next ones use it by default.
+    last: Option<PathBuf>,
 }
 
 pub fn is_shortcut(path: &Path) -> bool {
@@ -457,6 +472,7 @@ impl BuiltinPlugin for WebPlugin {
         let pressed = ctx.input(|i| i.pointer.any_pressed());
         let mut opened = Vec::new();
         let mut search = false;
+        let mut replies = Vec::new();
         for (path, page) in &mut self.pages {
             if let Some(view) = &mut page.view {
                 if !page.drawn {
@@ -469,6 +485,27 @@ impl BuiltinPlugin for WebPlugin {
             page.drawn = false;
             let mut shared = page.shared.borrow_mut();
             opened.append(&mut shared.new_windows);
+            for message in std::mem::take(&mut shared.messages) {
+                let Ok(message) = serde_json::from_str::<serde_json::Value>(&message) else {
+                    continue;
+                };
+                let field = |key: &str| message.get(key).and_then(|v| v.as_str()).unwrap_or("");
+                match field("atelier") {
+                    "console" => {
+                        if page.console.len() == serve::CONSOLE_LINES {
+                            page.console.pop_front();
+                        }
+                        page.console
+                            .push_back((field("level").to_string(), field("text").to_string()));
+                    }
+                    "reply" => replies.push((
+                        message.get("id").and_then(|v| v.as_u64()).unwrap_or(0),
+                        message.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+                        message.get("value").cloned().unwrap_or_default(),
+                    )),
+                    _ => {}
+                }
+            }
             if std::mem::take(&mut shared.search) {
                 search = true;
                 if let Some(view) = &page.view {
@@ -491,6 +528,8 @@ impl BuiltinPlugin for WebPlugin {
         if search {
             host.search_everywhere();
         }
+        self.take_calls(host);
+        self.advance(ctx, &mut replies);
     }
 
     fn file_saved(&mut self, path: &Path) {

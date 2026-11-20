@@ -101,3 +101,46 @@ fn search_everywhere_offers_to_open_addresses_not_file_names() {
     );
     assert!(plugin.query_commands("main.rs").is_empty());
 }
+
+#[test]
+fn the_mcp_tools_of_the_web_viewer_are_described_and_their_scripts_answer_by_id() {
+    let specs = remote::specs();
+    let names: Vec<&str> = specs.iter().filter_map(|s| s["name"].as_str()).collect();
+    for name in [
+        "web_open",
+        "web_snapshot",
+        "web_click",
+        "web_type",
+        "web_eval",
+        "web_screenshot",
+    ] {
+        assert!(names.contains(&name), "{name}");
+    }
+    assert!(names.iter().all(|n| remote::is_web_tool(n)));
+    assert!(!remote::is_web_tool("open_file"));
+    let script = remote::script(7, &serde_json::json!({"ref": 3}), remote::CLICK);
+    assert!(script.contains("const args = {\"ref\":3};"), "{script}");
+    assert!(script.contains("id: 7"));
+    // An expression returns its value; statements return what they say.
+    assert_eq!(
+        remote::eval_body("document.title;"),
+        "return (document.title
+);"
+    );
+    assert_eq!(
+        remote::eval_body("const a = 1; return a"),
+        "const a = 1; return a"
+    );
+    assert_eq!(
+        remote::eval_body("returned.length"),
+        "return (returned.length
+);"
+    );
+}
+
+#[test]
+fn pictures_go_to_the_mcp_server_as_images() {
+    let answer = remote::image_answer(&[1, 2, 3], "URL: x");
+    assert_eq!(remote::split_image(&answer), Some(("AQID", "URL: x")));
+    assert_eq!(remote::split_image("plain text"), None);
+}
