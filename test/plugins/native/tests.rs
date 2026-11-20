@@ -245,6 +245,7 @@ fn problems_of_a_plugin_are_placed_in_the_text_by_utf16_columns() {
         message: "unused".into(),
         source: "eslint".into(),
         code: code.map(String::from),
+        fixes: Vec::new(),
     };
     let placed = tools::place(
         text,
@@ -311,9 +312,63 @@ fn a_plugin_lints_and_formats_documents_through_the_interface() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
     assert_eq!(formatted.unwrap(), "let a = { b: 1 };\n");
+    // Its fixes, on the problem: ESLint's suggestion, and the comment that turns the rule off.
+    let fixes = tools.fixes(&file, unused.range.start);
+    assert!(
+        fixes.iter().any(|f| f.edits[0]
+            .new_text
+            .contains("eslint-disable-next-line no-unused-vars")),
+        "{fixes:?}"
+    );
+    // Elsewhere, none.
+    assert!(tools.fixes(&file, text.len()).is_empty());
     // A file none of its tools reads stays with the IDE.
     assert!(
         !tools.lints(Path::new("a.rs")) && tools.format(Path::new("a.rs"), "rust", "").is_none()
     );
     std::fs::remove_file(&file).ok();
+}
+
+#[test]
+fn fixes_of_a_plugin_are_offered_on_their_problem_and_all_at_once() {
+    use atelier_plugin_api::protocol::{Diagnostic as Found, Edit, Fix};
+    let text = "var a = 1;\nvar b = 2;\n";
+    let found = |line: u32, preferred: bool| Found {
+        line,
+        column: 0,
+        end_line: line,
+        end_column: 10,
+        source: "eslint".into(),
+        code: Some("no-var".into()),
+        fixes: vec![Fix {
+            title: format!("fix {line}"),
+            edits: vec![Edit {
+                line,
+                column: 0,
+                end_line: line,
+                end_column: 3,
+                text: "let".into(),
+            }],
+            preferred,
+        }],
+        ..Found::default()
+    };
+    let placed = tools::place_fixes(text, &[found(0, true), found(1, true)]);
+    let on_first = tools::fixes_at(&placed, 4);
+    assert_eq!(on_first[0].title, "fix 0");
+    assert_eq!(on_first[0].edits[0].range, 0..3);
+    // Two fixes of ESLint itself: both at once, the second edit on the second line.
+    let all = on_first.last().unwrap();
+    assert!(all.title.contains("eslint"), "{}", all.title);
+    assert_eq!(
+        all.edits
+            .iter()
+            .map(|e| e.range.clone())
+            .collect::<Vec<_>>(),
+        [0..3, 11..14]
+    );
+    // Off the problems, nothing; suggestions alone are not applied to the whole file.
+    assert!(tools::fixes_at(&placed, 30).is_empty());
+    let suggestions = tools::place_fixes(text, &[found(0, false), found(1, false)]);
+    assert_eq!(tools::fixes_at(&suggestions, 4).len(), 1);
 }

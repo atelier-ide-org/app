@@ -166,6 +166,15 @@ impl external::External for FakeLinter {
     fn diagnostics(&self, _path: &Path) -> Option<Arc<Vec<Diagnostic>>> {
         self.found.lock().unwrap().clone()
     }
+    fn fixes(&self, _path: &Path, offset: usize) -> Vec<QuickFix> {
+        (offset < 7)
+            .then(|| QuickFix {
+                title: "Capitalize".into(),
+                edits: Vec::new(),
+            })
+            .into_iter()
+            .collect()
+    }
     fn format(
         &self,
         _path: &Path,
@@ -253,4 +262,21 @@ fn a_plugin_formatter_comes_first_and_the_ide_keeps_the_rest() {
     // JSON is not the plugin's: the IDE formats it itself.
     let edits = wait(service.format(&doc("a.json", "json"), "{\"a\":1}")).unwrap();
     assert!(edits.iter().any(|e| e.new_text.contains("\"a\": 1")));
+}
+
+#[test]
+fn the_fixes_of_a_plugin_linter_come_with_alt_enter() {
+    let service = Service::default();
+    service.set_externals(vec![Arc::new(FakeLinter::default())]);
+    let doc = DocRef {
+        key: 1,
+        path: Some(PathBuf::from("a.md")),
+        language: "markdown".into(),
+    };
+    let fixes = wait(service.quick_fixes(&doc, "# title", 3));
+    assert_eq!(
+        fixes.iter().map(|f| f.title.as_str()).collect::<Vec<_>>(),
+        ["Capitalize"]
+    );
+    assert!(wait(service.quick_fixes(&doc, "# title", 20)).is_empty());
 }

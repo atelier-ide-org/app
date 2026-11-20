@@ -1526,6 +1526,38 @@ impl EditorState {
         self.assist.message = Some(message);
     }
 
+    /// The problems on the line of the caret.
+    fn caret_line_problems(&self) -> impl Iterator<Item = &Diagnostic> {
+        let line = self.line_of(self.cursor);
+        self.assist.diagnostics.iter().filter(move |d| {
+            self.line_of(d.range.start) <= line && line <= self.line_of(d.range.end)
+        })
+    }
+
+    /// The bulb of the gutter: the line of the caret when it has problems, with the worst one.
+    pub(super) fn bulb(&self) -> Option<(usize, Severity)> {
+        let worst = self.caret_line_problems().map(|d| d.severity).min()?;
+        Some((self.line_of(self.cursor), worst))
+    }
+
+    /// A click on the bulb: the fixes of a problem of the line, as Alt+Enter gives them. The
+    /// caret goes to the first problem when it is on none.
+    pub(super) fn open_line_fixes(&mut self) {
+        if self.diagnostics_at(self.cursor).is_empty() {
+            let line_start = self.lines[self.line_of(self.cursor)];
+            let first = self
+                .caret_line_problems()
+                .map(|d| d.range.start.max(line_start))
+                .next();
+            if let Some(start) = first {
+                self.anchor = start;
+                self.cursor = start;
+            }
+        }
+        self.assist.popup = None;
+        self.assist.want_fixes = true;
+    }
+
     fn diagnostics_at(&self, offset: usize) -> Vec<&Diagnostic> {
         self.assist
             .diagnostics

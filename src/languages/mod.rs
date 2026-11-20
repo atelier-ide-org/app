@@ -960,12 +960,37 @@ impl Service {
         })
     }
 
+    /// The actions at `offset`: the fixes the linters of the plugins offer for the problems
+    /// there, then the provider's.
     pub fn quick_fixes(&self, doc: &DocRef, text: &str, offset: usize) -> Oneshot<Vec<QuickFix>> {
+        let theirs: Vec<QuickFix> = match &doc.path {
+            Some(path) => {
+                let externals = self
+                    .inner
+                    .lock()
+                    .map(|inner| inner.externals.clone())
+                    .unwrap_or_default();
+                externals
+                    .iter()
+                    .filter(|e| e.lints(path))
+                    .flat_map(|e| e.fixes(path, offset))
+                    .collect()
+            }
+            None => Vec::new(),
+        };
         let (target, text) = self.route(doc, text, offset);
-        self.with(&target.language, |p, _| {
+        let own = self.with(&target.language, |p, _| {
             p.quick_fixes(&target, &text, offset)
-        })
-        .unwrap_or_else(|| Oneshot::ready(Vec::new()))
+        });
+        match own {
+            None => Oneshot::ready(theirs),
+            Some(own) if theirs.is_empty() => own,
+            Some(own) => join(vec![own], self.repaint.clone(), move |mut got| {
+                let mut all = theirs;
+                all.extend(got.pop().flatten().unwrap_or_default());
+                all
+            }),
+        }
     }
 
     /// The problems the language servers found in the files of the project; not the ones of
