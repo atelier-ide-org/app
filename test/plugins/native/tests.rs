@@ -230,3 +230,90 @@ fn the_icons_of_the_files_come_from_the_extensions_folder() {
     assert!(icon.variant(true).unwrap().uri.contains("dark"));
     assert!(icon.variant(false).unwrap().uri.contains("light"));
 }
+
+#[test]
+fn problems_of_a_plugin_are_placed_in_the_text_by_utf16_columns() {
+    use atelier_plugin_api::protocol::{Diagnostic as Found, Severity as Level};
+    // `é` is one UTF-16 unit and two bytes; `😀` is two units and four bytes.
+    let text = "let é = 1;\nlet 😀x = 2;\n";
+    let found = |line, column, end_column, severity, code: Option<&str>| Found {
+        line,
+        column,
+        end_line: line,
+        end_column,
+        severity,
+        message: "unused".into(),
+        source: "eslint".into(),
+        code: code.map(String::from),
+    };
+    let placed = tools::place(
+        text,
+        &[
+            found(1, 6, 7, Level::Error, None),
+            found(0, 4, 5, Level::Warning, Some("no-unused-vars")),
+        ],
+    );
+    assert_eq!(&text[placed[0].range.clone()], "é");
+    assert_eq!(placed[0].message, "unused (no-unused-vars)");
+    assert_eq!(placed[0].severity, crate::languages::Severity::Warning);
+    assert_eq!(&text[placed[1].range.clone()], "x");
+    assert_eq!(placed[1].message, "unused");
+}
+
+/// The Lint plugin, when it was built next to the IDE (`plugins/lint`), with a project that has
+/// ESLint and Prettier (`LINT_TEST_JS`, as for the tests of the plugin): a document goes to the
+/// plugin, and its problems and its formatting come back through the interface.
+#[test]
+fn a_plugin_lints_and_formats_documents_through_the_interface() {
+    let Some(root) = std::env::var_os("LINT_TEST_JS").map(PathBuf::from) else {
+        eprintln!("skipped: LINT_TEST_JS names no project");
+        return;
+    };
+    let library = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("plugins/lint/target/debug")
+        .join(super::super::library_file("lint"));
+    if !library.is_file() {
+        eprintln!("skipped: no plugin built at {}", library.display());
+        return;
+    }
+    let mut manifest = manifest(library.parent().unwrap(), "lint");
+    manifest.id = "lint".into();
+    let plugin = load(&manifest).unwrap();
+    plugin.instance.shared.project.lock().unwrap().root = Some(root.clone());
+    let tools = plugin.language_tools().expect("the plugin lints");
+    let file = root.join("through-the-interface.js");
+    let text = "let unused = 2;\n";
+    std::fs::write(&file, text).unwrap();
+    assert!(tools.lints(&file) && tools.formats(&file));
+    tools.document(&file, "javascript", text, 1);
+    let started = std::time::Instant::now();
+    let found = loop {
+        if let Some(found) = tools.diagnostics(&file) {
+            break found;
+        }
+        assert!(started.elapsed().as_secs() < 30, "no problems came back");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let unused = found
+        .iter()
+        .find(|d| d.message.contains("no-unused-vars"))
+        .expect("ESLint found the unused variable");
+    assert_eq!(&text[unused.range.clone()], "unused");
+    let answer = tools
+        .format(&file, "javascript", "let  a={b:1}")
+        .expect("Prettier or Oxfmt takes it");
+    let started = std::time::Instant::now();
+    let formatted = loop {
+        if let Some(formatted) = answer.take() {
+            break formatted;
+        }
+        assert!(started.elapsed().as_secs() < 30, "no formatting came back");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert_eq!(formatted.unwrap(), "let a = { b: 1 };\n");
+    // A file none of its tools reads stays with the IDE.
+    assert!(
+        !tools.lints(Path::new("a.rs")) && tools.format(Path::new("a.rs"), "rust", "").is_none()
+    );
+    std::fs::remove_file(&file).ok();
+}

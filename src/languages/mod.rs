@@ -6,6 +6,7 @@
 //! a [`Oneshot`] the editor polls.
 
 pub mod css;
+pub mod external;
 pub mod format;
 pub mod html;
 pub mod inspect;
@@ -378,6 +379,14 @@ struct Inner {
     merged: HashMap<u64, (Vec<usize>, Arc<Vec<Diagnostic>>)>,
     /// Reformat Code of the languages without a provider, from the plugins that are on.
     formatters: Vec<(&'static str, format::Formatter)>,
+    /// The linters and formatters of the plugins that are on.
+    externals: Vec<Arc<dyn external::External>>,
+    /// The file and the version of each document they were given last.
+    external_docs: HashMap<u64, (PathBuf, u64)>,
+    /// The problems of each document with theirs, and what they were made of.
+    external_merged: HashMap<u64, (Vec<usize>, Arc<Vec<Diagnostic>>)>,
+    /// The problems of a document no provider handles: always the same list.
+    no_diagnostics: Arc<Vec<Diagnostic>>,
 }
 
 /// The code of other languages in a page.
@@ -498,6 +507,44 @@ impl Service {
         }
     }
 
+    /// The linters and formatters of the plugins that are on; set again when a plugin is turned on
+    /// or off. The open documents go to the new ones on their next update.
+    pub fn set_externals(&self, externals: Vec<Arc<dyn external::External>>) {
+        if let Ok(mut inner) = self.inner.lock() {
+            let same = inner.externals.len() == externals.len()
+                && inner
+                    .externals
+                    .iter()
+                    .zip(&externals)
+                    .all(|(a, b)| Arc::ptr_eq(a, b));
+            if same {
+                return;
+            }
+            inner.externals = externals;
+            inner.external_docs.clear();
+            inner.external_merged.clear();
+        }
+    }
+
+    /// Whether a linter or a formatter of a plugin reads or formats the file `path`.
+    fn external_covers(&self, path: &Option<PathBuf>) -> bool {
+        let Some(path) = path else {
+            return false;
+        };
+        self.inner.lock().is_ok_and(|inner| {
+            inner
+                .externals
+                .iter()
+                .any(|e| e.lints(path) || e.formats(path))
+        })
+    }
+
+    /// Whether the editor of a document asks the service for anything: its language has a
+    /// provider or a formatter, or a plugin lints or formats its file.
+    pub fn assists(&self, path: &Option<PathBuf>, language: &str) -> bool {
+        self.formats(language) || self.external_covers(path)
+    }
+
     fn formatter(&self, language: &str) -> Option<format::Formatter> {
         let inner = self.inner.lock().ok()?;
         inner
@@ -519,6 +566,7 @@ impl Service {
         let Ok(mut inner) = self.inner.lock() else {
             return;
         };
+        Self::update_externals(&mut inner, doc, text, version);
         if !Self::update_in(&mut inner, doc, text, version) {
             return;
         }
@@ -564,6 +612,30 @@ impl Service {
         }
     }
 
+    /// Gives the text of `doc` to the linters of the plugins that read its file, when it changed.
+    fn update_externals(inner: &mut Inner, doc: &DocRef, text: &str, version: u64) {
+        let Some(path) = &doc.path else {
+            return;
+        };
+        if inner.externals.is_empty()
+            || inner
+                .external_docs
+                .get(&doc.key)
+                .is_some_and(|(p, v)| p == path && *v == version)
+        {
+            return;
+        }
+        // Saved under another name: the problems of the old file go.
+        if let Some((old, _)) = inner.external_docs.insert(doc.key, (path.clone(), version))
+            && &old != path
+        {
+            inner.externals.iter().for_each(|e| e.closed(&old));
+        }
+        for external in inner.externals.iter().filter(|e| e.lints(path)) {
+            external.document(path, &doc.language, text, version);
+        }
+    }
+
     /// Tells the provider of `doc` its text. False when nothing changed, or no provider
     /// handles it.
     fn update_in(inner: &mut Inner, doc: &DocRef, text: &str, version: u64) -> bool {
@@ -594,6 +666,10 @@ impl Service {
         if let Some(index) = inner.owners.remove(&key) {
             inner.providers[index].close(key);
         }
+        if let Some((path, _)) = inner.external_docs.remove(&key) {
+            inner.externals.iter().for_each(|e| e.closed(&path));
+        }
+        inner.external_merged.remove(&key);
         inner.versions.remove(&key);
         inner.completed_in.remove(&key);
         inner.merged.remove(&key);
@@ -611,17 +687,57 @@ impl Service {
         Self::close_in(&mut inner, key);
     }
 
-    /// The problems of a document; for a page, with the ones its code has in its own language.
+    /// The problems of a document: its provider's (for a page, with the ones its code has in its
+    /// own language), and the ones the linters of the plugins found in its file.
     pub fn diagnostics(&self, doc: &DocRef) -> Arc<Vec<Diagnostic>> {
         let Ok(mut inner) = self.inner.lock() else {
             return Arc::default();
         };
+        let own = Self::provider_diagnostics(&mut inner, doc);
+        let Some(path) = &doc.path else {
+            return own;
+        };
+        let theirs: Vec<Arc<Vec<Diagnostic>>> = inner
+            .externals
+            .iter()
+            .filter(|e| e.lints(path))
+            .filter_map(|e| e.diagnostics(path))
+            .filter(|found| !found.is_empty())
+            .collect();
+        if theirs.is_empty() {
+            return own;
+        }
+        // Made of the same parts as last time: the same list.
+        let made_of: Vec<usize> = std::iter::once(&own)
+            .chain(&theirs)
+            .map(|p| Arc::as_ptr(p) as usize)
+            .collect();
+        if let Some((cached_of, cached)) = inner.external_merged.get(&doc.key)
+            && *cached_of == made_of
+        {
+            return cached.clone();
+        }
+        let mut all: Vec<Diagnostic> = own.as_ref().clone();
+        for found in &theirs {
+            all.extend(found.iter().cloned());
+        }
+        all.sort_by_key(|d| (d.range.start, d.severity));
+        let merged = Arc::new(all);
+        inner
+            .external_merged
+            .insert(doc.key, (made_of, merged.clone()));
+        merged
+    }
+
+    /// The problems the provider of a document found; for a page, with the ones its code has in
+    /// its own language.
+    fn provider_diagnostics(inner: &mut Inner, doc: &DocRef) -> Arc<Vec<Diagnostic>> {
         let Some(index) = inner
             .providers
             .iter()
             .position(|p| p.handles(&doc.language))
         else {
-            return Arc::default();
+            return inner.no_diagnostics.clone();
         };
         let own = inner.providers[index].diagnostics(doc.key);
         let Some(page) = inner.pages.get(&doc.key) else {
@@ -964,9 +1080,38 @@ impl Service {
         self.handles(language) || language == "json" || self.formatter(language).is_some()
     }
 
-    /// The edits that reformat the document: its provider's, else a plugin's, else the IDE's own
-    /// for JSON.
+    /// The edits that reformat the document: a formatter of a plugin that takes its file
+    /// (Prettier…), else the IDE's.
     pub fn format(&self, doc: &DocRef, text: &str) -> Oneshot<Result<Vec<TextEdit>, String>> {
+        let externals = self
+            .inner
+            .lock()
+            .map(|inner| inner.externals.clone())
+            .unwrap_or_default();
+        let theirs = doc.path.as_ref().and_then(|path| {
+            externals
+                .iter()
+                .filter(|e| e.formats(path))
+                .find_map(|e| e.format(path, &doc.language, text))
+        });
+        let Some(theirs) = theirs else {
+            return self.own_format(doc, text);
+        };
+        let original = text.to_string();
+        join(
+            vec![theirs],
+            self.repaint.clone(),
+            move |mut got| match got.pop().flatten() {
+                Some(Ok(new)) => Ok(format::edits_between(&original, &new)),
+                Some(Err(e)) => Err(e),
+                None => Err(tr!("formatter_took_too_long").into()),
+            },
+        )
+    }
+
+    /// The edits the IDE reformats the document with: its provider's, else a plugin's, else the
+    /// IDE's own for JSON.
+    fn own_format(&self, doc: &DocRef, text: &str) -> Oneshot<Result<Vec<TextEdit>, String>> {
         // A plugin's first: the provider of YAML only reads schemas.
         if let Some(formatter) = self.formatter(&doc.language) {
             return Oneshot::ready(formatter(text).map(|new| format::edits_between(text, &new)));

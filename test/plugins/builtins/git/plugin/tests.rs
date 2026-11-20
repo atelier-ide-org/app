@@ -335,3 +335,25 @@ fn submodules_are_read_from_gitmodules() {
     );
     assert!(submodules("").is_empty());
 }
+
+#[test]
+fn the_clone_dialog_stays_open_outside_a_repository() {
+    // The start screen has no project: the folder is no repository.
+    let root = std::env::temp_dir().join(format!("atelier-no-repo-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let ctx = egui::Context::default();
+    let mut host = NoHost(root.clone());
+    let mut plugin = GitPlugin::default();
+    plugin.poll(&ctx, &mut host);
+    plugin.run_command("git.clone", &mut host);
+    for _ in 0..3 {
+        plugin.poll(&ctx, &mut host);
+    }
+    assert!(matches!(plugin.dialog, Some(Dialog::Clone { .. })));
+    // Coming back to the window (after copying the URL elsewhere) keeps it as well.
+    plugin.focused = false;
+    plugin.poll(&ctx, &mut host);
+    plugin.poll(&ctx, &mut host);
+    assert!(matches!(plugin.dialog, Some(Dialog::Clone { .. })));
+    std::fs::remove_dir_all(&root).ok();
+}

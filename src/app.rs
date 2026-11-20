@@ -5345,17 +5345,16 @@ impl Ide {
                 }
                 let font = FontId::monospace(self.settings.font_size);
                 let annotations = gutter.annotations.as_deref();
-                let assist = self
-                    .languages
-                    .formats(&doc.language)
-                    .then(|| crate::editor::Assist {
+                let assist = self.languages.assists(&doc.path, &doc.language).then(|| {
+                    crate::editor::Assist {
                         service: &self.languages,
                         doc: crate::languages::DocRef {
                             key: doc_key(&doc.path, self.active),
                             path: doc.path.clone(),
                             language: doc.language.clone(),
                         },
-                    });
+                    }
+                });
                 let bookmark_lines = Ide::bookmark_lines(
                     &mut self.bookmarks,
                     &mut self.bookmark_rev,
@@ -7412,7 +7411,8 @@ impl Ide {
         }
     }
 
-    /// Gives the language service the formatters and the JSON schemas of the plugins that are on.
+    /// Gives the language service the formatters, the JSON schemas, the linters and the formatters
+    /// of files of the plugins that are on.
     fn sync_plugin_languages(&self) {
         let on = || {
             self.builtins
@@ -7423,6 +7423,8 @@ impl Ide {
             .set_formatters(on().flat_map(|p| p.formatters().iter().copied()).collect());
         self.languages
             .set_json_schemas(on().flat_map(|p| p.json_schemas()).collect());
+        self.languages
+            .set_externals(on().filter_map(|p| p.language_tools()).collect());
     }
 
     fn dropped_files(&mut self, ctx: &egui::Context) {
@@ -7611,7 +7613,7 @@ impl Host for Ide {
         let mut out = Vec::new();
         for (index, doc) in self.documents.iter().enumerate() {
             let Some(path) = &doc.path else { continue };
-            if !self.languages.handles(&doc.language) {
+            if !self.languages.assists(&doc.path, &doc.language) {
                 continue;
             }
             let reference = crate::languages::DocRef {

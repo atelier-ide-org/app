@@ -297,6 +297,7 @@
   "fonts": "Polices",
   "fonts_change_on_apply": "Les polices changent quand les paramètres sont appliqués.",
   "fonts_shown": "{shown} polices affichées sur {count} : affinez la recherche.",
+  "formatter_took_too_long": "Le formateur a mis trop de temps à répondre",
   "forward_next_location": "Emplacement suivant",
   "found_path": "Trouvé dans le PATH",
   "gb": "{mo} Go",

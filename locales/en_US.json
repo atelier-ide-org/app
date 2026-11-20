@@ -297,6 +297,7 @@
   "fonts": "Fonts",
   "fonts_change_on_apply": "The fonts change when the settings are applied.",
   "fonts_shown": "{shown} of {count} fonts shown: search to narrow the list.",
+  "formatter_took_too_long": "The formatter took too long to answer",
   "forward_next_location": "Forward to Next Location",
   "found_path": "Found on the PATH",
   "gb": "{mo} GB",

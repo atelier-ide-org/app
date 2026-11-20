@@ -400,9 +400,23 @@ impl GitPlugin {
     fn open(&mut self, root: PathBuf) {
         let console = self.console.clone();
         let theme = self.theme;
+        let focused = self.focused;
+        // A clone belongs to no repository: its dialog and its job outlive the project, or the
+        // Clone button of the start screen, which has none, would lose them.
+        let dialog = self
+            .dialog
+            .take()
+            .filter(|d| matches!(d, Dialog::Clone { .. }));
+        let job = self
+            .job
+            .take()
+            .filter(|j| matches!(j.after, After::OpenProject(_)));
         *self = Self {
             console,
             theme,
+            focused,
+            dialog,
+            job,
             ..Self::default()
         };
         match Repo::open(&root, self.console.clone()) {
@@ -508,7 +522,11 @@ impl GitPlugin {
             self.open(root);
         }
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
-        if focused && !self.focused {
+        let regained = focused && !self.focused;
+        // Before the early return: forgotten, the focus would look regained at every frame, and
+        // the plugin would open the project again, losing its state, frame after frame.
+        self.focused = focused;
+        if regained {
             if self.repo.is_none() {
                 // `git init` may have been run in the terminal.
                 self.project = None;
@@ -516,7 +534,6 @@ impl GitPlugin {
             }
             self.stale = true;
         }
-        self.focused = focused;
         if self
             .refreshed_at
             .is_none_or(|t| t.elapsed() > REFRESH_EVERY)

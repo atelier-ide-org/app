@@ -304,6 +304,11 @@ pub trait BuiltinPlugin {
     fn formatters(&self) -> &'static [(&'static str, crate::languages::format::Formatter)] {
         &[]
     }
+    /// The linters and formatters the plugin brings on top of the languages (ESLint,
+    /// Prettier…), for the files they cover.
+    fn language_tools(&self) -> Option<std::sync::Arc<dyn crate::languages::external::External>> {
+        None
+    }
     /// The schemas of the JSON files this plugin knows (`package.json` for Node.js): they check
     /// the values of those files, complete their keys and describe them under the mouse.
     fn json_schemas(&self) -> &'static [crate::languages::json::Schema] {
