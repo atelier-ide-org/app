@@ -15,4 +15,5 @@ pub mod node;
 pub mod runtimes;
 pub mod svg;
 pub mod translations;
+pub mod web;
 pub mod yaml;

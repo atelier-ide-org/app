@@ -80,16 +80,25 @@ atelier-plugin-api = { path = "api", default-features = false, features = ["serd
 # The YAML plugin: checks a reformat kept the data, and converts YAML to JSON.
 yaml-rust2 = { version = "0.13", default-features = false }
 
+# The Web viewer: the web view of the system (WebView2, WKWebView) as a child of the window.
+# Linux would need WebKitGTK and a GTK window, which eframe has not.
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+wry = { version = "0.57", default-features = false, features = ["devtools"] }
+
 [target.'cfg(windows)'.dependencies]
-# Placement of the window on the monitor in use, its taskbar button, its rounded corners and
-# its crash log.
+# Placement of the window on the monitor in use, its taskbar button, its rounded corners, its
+# crash log and the files dragged out of it.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
     "Win32_System_Console",
+    "Win32_System_Ole",
     "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

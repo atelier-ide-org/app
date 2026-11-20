@@ -364,6 +364,7 @@ pub fn all() -> Vec<Box<dyn BuiltinPlugin>> {
         Box::new(crate::features::search::SearchPlugin::default()),
         Box::new(crate::features::problems::ProblemsPlugin::default()),
         Box::new(crate::plugins::builtins::image::ImagePlugin::default()),
+        Box::new(crate::plugins::builtins::web::WebPlugin::default()),
         Box::new(crate::plugins::builtins::k8s::K8sPlugin::default()),
         Box::new(crate::plugins::builtins::node::NodePlugin::default()),
         Box::new(crate::plugins::builtins::cargo::CargoPlugin::default()),

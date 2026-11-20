@@ -1,0 +1,16 @@
+{
+  "web.address_hint": "Address or search",
+  "web.back": "Back",
+  "web.devtools": "Developer tools",
+  "web.forward": "Forward",
+  "web.html_page": "Web: page of the HTML file next to its source",
+  "web.main_window_only": "Web pages show in the main window of the IDE.",
+  "web.open_html_file": "Open an HTML file",
+  "web.open_in_browser": "Open in the system browser",
+  "web.open_in_viewer": "Open in the Web viewer",
+  "web.open_page": "Web: open a page",
+  "web.page": "Web page",
+  "web.reload": "Reload",
+  "web.stop": "Stop",
+  "web.unsupported": "The Web viewer is not available on this system yet."
+}

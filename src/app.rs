@@ -609,6 +609,8 @@ pub struct Ide {
     tree_drop_next: Option<PathBuf>,
     /// Folder the dragged entry hovers and since when: it opens after a short delay.
     tree_hover: Option<(PathBuf, Instant)>,
+    /// Files last dragged out of the window, and when: dropped back on it, they are not opened.
+    dragged_out: Option<(Vec<PathBuf>, Instant)>,
     scroll_to_selected: bool,
     doc_drag: Option<usize>,
 
@@ -886,6 +888,7 @@ impl Ide {
             new_name: String::new(),
             tree_dialog: None,
             tree_drag: None,
+            dragged_out: None,
             tree_drop: None,
             tree_drop_next: None,
             tree_hover: None,
@@ -955,6 +958,7 @@ impl Ide {
             // The folder of a file given on the command line: read, never written.
             ide.load_project_plugins(false);
         }
+        crate::window::remember_main(cc);
         ide.window = crate::window::Window::new(cc);
         if let Some(window) = &mut ide.window {
             let size = if start_screen {
@@ -3565,6 +3569,31 @@ impl Ide {
 
     /// Ends a drag in the tree: moves the entry into the folder it was dropped on.
     fn finish_tree_drag(&mut self, ctx: &egui::Context) {
+        // Out of the window, the drag goes on as one of the system: the desktop, a folder of
+        // Explorer or a web page receives copies of the files.
+        if self.tree_drag.is_some()
+            && ctx.input(|i| {
+                i.pointer.primary_down()
+                    && i.pointer
+                        .latest_pos()
+                        .is_none_or(|p| !i.content_rect().contains(p))
+            })
+            && let Some(window) = &self.window
+        {
+            let mut set = std::mem::take(&mut self.tree_drag_set);
+            if set.is_empty() {
+                set.extend(self.tree_drag.clone());
+            }
+            self.tree_drag = None;
+            self.tree_drop = None;
+            self.tree_drop_next = None;
+            self.tree_hover = None;
+            if window.drag_files(&set) {
+                let set = set.iter().map(|p| project::simplify(p)).collect();
+                self.dragged_out = Some((set, Instant::now()));
+            }
+            return;
+        }
         if let Some(from) = &self.tree_drag
             && let Some(pointer) = ctx.pointer_interact_pos()
         {
@@ -7435,6 +7464,15 @@ impl Ide {
                 .map(|f| f.path().to_path_buf())
                 .collect()
         });
+        // Files of the project dragged out and back in: given up, rather than opened.
+        let ours = |path: &PathBuf| {
+            self.dragged_out.as_ref().is_some_and(|(set, when)| {
+                when.elapsed() < Duration::from_secs(2) && set.contains(&project::simplify(path))
+            })
+        };
+        if !dropped.is_empty() && dropped.iter().all(ours) {
+            return;
+        }
         for path in dropped {
             if path.is_dir() {
                 self.open_project(path);
