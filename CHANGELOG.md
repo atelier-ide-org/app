@@ -2,6 +2,38 @@
 
 Every version of Atelier IDE. The entries come from the files of `.changeset/` (see [Versions & releases](https://atelier-ide-org.github.io/docs/contributing/releases)).
 
+## 0.6.0 (2026-11-25)
+
+### Breaking Changes
+
+#### Un éditeur visuel Markdown, JS/TS plus complet, et Rechercher dans les fichiers comme Maj Maj
+
+Un fichier Markdown a un quatrième mode d'affichage, **Éditeur visuel** : le document rendu, dont un bloc cliqué passe en édition à l'endroit du clic, avec une barre d'outils (gras, italique, barré, code, lien, titres, listes, cases à cocher, citation, bloc de code, tableau, ligne) et Ctrl+B, Ctrl+I, Ctrl+K ; Échap le quitte. Dans l'aperçu, les puces et les numéros sont alignés sur le texte, les tableaux ont de la marge dans leurs cellules, un en-tête marqué et des lignes alternées, et les lignes vides en plus sont gardées. L'aperçu ne plante plus sur un long fichier ni sur un fichier modifié par une IA pendant qu'il est ouvert.
+
+En JavaScript et TypeScript, **Trouver les usages** d'un `export default` (ou d'un nom exporté) trouve ses imports dans tout le projet, même sous un autre nom, à travers les ré-exports et les fichiers `index`. Le survol montre le type et la documentation d'un nom importé et d'un export par défaut, et le serveur TypeScript lit le projet entier : la barre d'état indique quand il le charge.
+
+Ctrl+Maj+F ouvre **Rechercher dans les fichiers** dans la fenêtre de **Rechercher partout** : les correspondances du texte arrivent pendant la frappe, surlignées, et Ctrl+Entrée les montre toutes dans la fenêtre Recherche, pour les remplacer. Maj Maj ouvre de nouveau **Rechercher partout** (egui 0.37 compte Maj comme une touche, ce qui l'empêchait). Aller à une déclaration, un usage ou un résultat fait défiler l'éditeur sans animation.
+
+### Features
+
+#### Glisser les fichiers de l'arbre hors de l'IDE
+
+Un fichier ou un dossier de l'arbre du projet, ou toute la sélection, se glisse hors de la fenêtre comme depuis l'Explorateur : sur le bureau, dans un dossier, dans une page web qui reçoit des fichiers ou dans un autre programme. Ce sont des copies : le projet garde ses fichiers. Pour l'instant sous Windows.
+
+#### Les linters et formateurs des plugins, et deux corrections au démarrage
+
+Un plugin natif peut désormais lire les documents des fichiers qu'il annonce (`Info::lints`) et y trouver des problèmes : ils s'affichent dans l'éditeur, la gouttière et **Problèmes** avec ceux du langage, même pour un fichier qu'aucun langage de l'IDE ne prend en charge (Markdown, shell, Dockerfile…). Il peut aussi formater ceux qu'il annonce (`Info::formats`) : **Reformater le code** passe d'abord par lui, et l'IDE garde son propre formateur quand le plugin le laisse. L'interface des plugins passe en 0.5 (`document`, `format`, `diagnostics`, `formatted`), sans changer d'ABI. Chaque problème peut porter ses corrections : Alt+Entrée les propose sur le problème, avec « corriger tous les problèmes » d'un outil quand il en a plusieurs. Une ampoule apparaît dans la gouttière sur la ligne du curseur quand elle a un problème : un clic dessus ouvre ces corrections. Le plugin **Lint** s'en sert pour ESLint, Oxlint, Biome, Stylelint, Ruff, ShellCheck et d'autres, avec Prettier et Oxfmt.
+
+Le bouton **Cloner** de l'écran d'accueil ouvre de nouveau la fenêtre de clonage : hors d'un dépôt Git, le plugin Git se réinitialisait à chaque image et l'effaçait aussitôt. Elle reste aussi ouverte quand on revient dans l'IDE après avoir copié l'adresse ailleurs.
+
+Sous Windows, la fenêtre du démarrage n'a plus de rectangle gris autour de sa carte : la fenêtre est la carte, et c'est le système qui dessine son ombre et ses coins arrondis.
+
+#### Un visualiseur web dans l'éditeur
+
+Le plugin intégré **Visualiseur web** ouvre des pages web dans un onglet de l'éditeur, comme un navigateur : **Web : ouvrir une page** dans la palette, une barre d'adresse (une adresse, un chemin ou des mots à chercher), précédent, suivant, recharger, les outils de développement et l'ouverture dans le navigateur du système. Un lien vers une nouvelle fenêtre ouvre un nouvel onglet. Une adresse tapée dans **Rechercher partout** (Maj Maj) s'ouvre dans le visualiseur, et Maj Maj marche aussi depuis la page. Les fichiers `.url` (raccourcis Internet) s'ouvrent dedans, et un fichier HTML montre sa page à côté de sa source, rechargée à chaque enregistrement. Il utilise le moteur web du système (WebView2 sous Windows, WebKit sous macOS) ; pas encore sous Linux.
+
+Une IA le pilote par le serveur MCP de l'IDE, avec les outils `web_*` : ouvrir une page, lire ses éléments numérotés (`web_snapshot`) et son texte, cliquer, taper, faire défiler, attendre, exécuter du JavaScript, lire la console et en prendre une capture (`web_screenshot`, en image).
+
 ## 0.5.0 (2026-11-18)
 
 ### Breaking Changes
