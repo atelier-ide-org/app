@@ -109,6 +109,7 @@ impl Ide {
                 continue;
             }
             hits.push(Hit {
+                mark: None,
                 label,
                 hint: format!("{name}:{}", line + 1),
                 icon: None,
@@ -347,6 +348,7 @@ impl Ide {
                     .into_owned();
                 let place = format!("{name}:{}", b.line + 1);
                 Hit {
+                    mark: None,
                     label: if b.text.is_empty() {
                         name.clone()
                     } else {
@@ -395,6 +397,7 @@ impl Ide {
                     .unwrap_or((0, 0));
                 let when = since(now, version.at);
                 Hit {
+                    mark: None,
                     label: when,
                     hint: format!("+{added} −{removed}  {} B", version.size),
                     icon: None,

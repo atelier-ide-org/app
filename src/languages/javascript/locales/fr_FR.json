@@ -180,6 +180,8 @@
   "javascript.javascript_language_server": "Serveur de langage JavaScript : {message}",
   "javascript.javascript_language_server_installed": "Serveur de langage JavaScript installé",
   "javascript.javascript_restart_language_server": "JavaScript : redémarrer le serveur de langage",
+  "javascript.tsserver_loading_project": "tsserver : chargement du projet…",
+  "javascript.hover_from_module": "depuis « {module} »",
   "javascript.js_local_analysis": "JS : analyse locale",
   "javascript.js_server_failed": "JS : serveur en échec ({reason})",
   "javascript.json.parse": "Convertit du JSON en valeur JavaScript.",

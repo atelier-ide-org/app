@@ -15,6 +15,7 @@ use std::{
 
 mod html;
 pub mod remote_svg;
+mod visual;
 
 #[derive(Default)]
 struct View {
@@ -30,6 +31,8 @@ pub struct MarkdownPlugin {
     cache: CommonMarkCache,
     /// Images of the mermaid blocks drawn by the last frame.
     diagrams: Vec<String>,
+    /// The visual editors of the documents shown in that layout.
+    visual: HashMap<PathBuf, visual::Visual>,
 }
 
 pub fn is_markdown(path: &Path) -> bool {
@@ -50,8 +53,66 @@ fn base_uri(path: &Path) -> String {
     }
 }
 
+/// The style of the rendered document: 28 px for a level 1 title, as in the IntelliJ preview,
+/// down to the 14 px body text.
+pub(super) fn preview_style(ui: &mut egui::Ui, t: &ui::Theme) {
+    let style = ui.style_mut();
+    style.visuals.override_text_color = Some(t.text);
+    // Heading sizes derive from these.
+    style
+        .text_styles
+        .insert(egui::TextStyle::Heading, ui::semibold(28.0));
+    style
+        .text_styles
+        .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
+    // The font of bold text and of the titles (see vendor/README.md): the viewer alone only
+    // makes them a little brighter.
+    style
+        .text_styles
+        .insert(egui::TextStyle::Name("strong".into()), ui::semibold(14.0));
+    style.spacing.item_spacing.y = 8.0;
+}
+
+/// Draws a piece of Markdown, its HTML tags of paragraphs read as their Markdown. A task ticked
+/// in it changes `text`.
+pub(super) fn show_markdown(
+    ui: &mut egui::Ui,
+    cache: &mut CommonMarkCache,
+    text: &mut String,
+    base: &str,
+    max_width: f32,
+) {
+    // egui_commonmark keeps the function of the HTML blocks as 'static.
+    let html_base = base.to_string();
+    let render_html =
+        move |ui: &mut egui::Ui, block: &str| html::show(ui, block, &html_base, max_width);
+    let show = |ui: &mut egui::Ui, cache: &mut CommonMarkCache, text: &mut String| {
+        CommonMarkViewer::new()
+            .default_implicit_uri_scheme(base)
+            .max_image_width(Some(max_width as usize))
+            .render_html_fn(Some(&render_html))
+            .show_mut(ui, cache, text);
+    };
+    let Some(converted) = html::inline_to_markdown(text) else {
+        show(ui, cache, text);
+        return;
+    };
+    let mut copy = converted.text.clone();
+    show(ui, cache, &mut copy);
+    // A task ticked in the converted text: the same box in the source.
+    if let Some(at) = copy
+        .bytes()
+        .zip(converted.text.bytes())
+        .position(|(a, b)| a != b)
+    {
+        let source = converted.source_offset(at);
+        text.replace_range(source..source + 1, &copy[at..at + 1]);
+    }
+}
+
 impl BuiltinPlugin for MarkdownPlugin {
     fn file_closed(&mut self, _ctx: &egui::Context, path: &Path) {
+        self.visual.remove(path);
         if self.views.remove(path).is_some() {
             // What the previews laid out; the ones still open lay it out again.
             self.cache = CommonMarkCache::default();
@@ -81,6 +142,7 @@ impl BuiltinPlugin for MarkdownPlugin {
             ("markdown.text", tr!("markdown.markdown_editor_only")),
             ("markdown.split", tr!("markdown.markdown_editor_preview")),
             ("markdown.preview", tr!("markdown.markdown_preview_only")),
+            ("markdown.visual", tr!("markdown.markdown_visual_editor")),
         ]
         .into_iter()
         .map(|(id, label)| Command {
@@ -95,6 +157,7 @@ impl BuiltinPlugin for MarkdownPlugin {
             "markdown.text" => EditorLayout::Text,
             "markdown.split" => EditorLayout::Split,
             "markdown.preview" => EditorLayout::Preview,
+            "markdown.visual" => EditorLayout::Visual,
             _ => return,
         };
         match host.active_file().filter(|p| is_markdown(p)) {
@@ -109,6 +172,22 @@ impl BuiltinPlugin for MarkdownPlugin {
 
     fn set_editor_layout(&mut self, path: &Path, layout: EditorLayout) {
         self.layouts.insert(path.to_path_buf(), layout);
+    }
+
+    fn visual_editing(&self, path: &Path) -> bool {
+        is_markdown(path)
+    }
+
+    fn visual_editor(&mut self, ui: &mut egui::Ui, path: &Path, text: &mut String) {
+        let base = base_uri(path);
+        let id = egui::Id::unique(("markdown_visual", path));
+        self.visual.entry(path.to_path_buf()).or_default().show(
+            ui,
+            &mut self.cache,
+            id,
+            text,
+            &base,
+        );
     }
 
     fn preview(&mut self, ui: &mut egui::Ui, path: &Path, text: &mut String, scroll: Option<f32>) {
@@ -127,55 +206,12 @@ impl BuiltinPlugin for MarkdownPlugin {
                 .inner_margin(Margin::symmetric(28, 18))
                 .show(ui, |ui| {
                     ui.set_max_width((width - 56.0).max(200.0));
-                    let style = ui.style_mut();
-                    style.visuals.override_text_color = Some(t.text);
-                    // Heading sizes derive from these: 28 px for a level 1 title, as in the
-                    // IntelliJ preview, down to the 14 px body text.
-                    style
-                        .text_styles
-                        .insert(egui::TextStyle::Heading, ui::semibold(28.0));
-                    style
-                        .text_styles
-                        .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
-                    // The font of bold text and of the titles (see vendor/README.md): the
-                    // viewer alone only makes them a little brighter.
-                    style
-                        .text_styles
-                        .insert(egui::TextStyle::Name("strong".into()), ui::semibold(14.0));
-                    style.spacing.item_spacing.y = 8.0;
+                    preview_style(ui, &t);
                     let max_width = (width - 80.0).max(100.0);
                     let base = base_uri(path);
-                    // egui_commonmark keeps the function of the HTML blocks as 'static.
-                    let html_base = base.clone();
-                    let render_html = move |ui: &mut egui::Ui, block: &str| {
-                        html::show(ui, block, &html_base, max_width)
-                    };
-                    let show =
-                        |ui: &mut egui::Ui, cache: &mut CommonMarkCache, text: &mut String| {
-                            CommonMarkViewer::new()
-                                .default_implicit_uri_scheme(&base)
-                                .max_image_width(Some(max_width as usize))
-                                .render_html_fn(Some(&render_html))
-                                .show_mut(ui, cache, text);
-                        };
                     let viewer =
                         |ui: &mut egui::Ui, cache: &mut CommonMarkCache, text: &mut String| {
-                            // The HTML tags of the paragraphs are read as their Markdown.
-                            let Some(converted) = html::inline_to_markdown(text) else {
-                                show(ui, cache, text);
-                                return;
-                            };
-                            let mut copy = converted.text.clone();
-                            show(ui, cache, &mut copy);
-                            // A task ticked in the converted text: the same box in the source.
-                            if let Some(at) = copy
-                                .bytes()
-                                .zip(converted.text.bytes())
-                                .position(|(a, b)| a != b)
-                            {
-                                let source = converted.source_offset(at);
-                                text.replace_range(source..source + 1, &copy[at..at + 1]);
-                            }
+                            show_markdown(ui, cache, text, &base, max_width)
                         };
                     let mut blocks = mermaid::split_blocks(text);
                     if blocks.iter().all(|b| matches!(b, Block::Text(_))) {

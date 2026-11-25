@@ -30,15 +30,17 @@ eframe = { version = "0.37", default-features = false, features = [
 egui_extras = { version = "0.37", features = ["syntect", "svg", "svg_text", "image", "file", "http"] }
 # Draws the SVG of a diagram (the renderer gives text, not a tree of its own resvg) and the badges
 # of a README, with the fonts of the system.
-resvg = { version = "0.49", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
+resvg = { version = "0.50", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
 mermaid-rs-renderer = { version = "0.3", default-features = false, features = ["png"] }
 egui_commonmark = { version = "0.26", features = ["better_syntax_highlighting", "svg"] }
 # The parser of egui_commonmark: where the HTML of a Markdown document is.
 pulldown-cmark = { version = "0.13", default-features = false }
+# A fast hash of the text of a document, to tell that it changed outside the editor.
+foldhash = "0.2"
 # The name of an installed font and whether it is monospaced.
 ttf-parser = "0.25"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
-rfd = "0.17"
+rfd = "0.18"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 portable-pty = "0.9"
@@ -74,22 +76,32 @@ spellbook = "0.4.2"
 raw-window-handle = "0.6"
 tree-sitter-python = "0.25"
 # Native plugins: the dynamic libraries of `.atelier/plugins`, and the interface they implement.
-libloading = "0.8"
+libloading = "0.9"
 # The interface of the native plugins (the submodule `api/`): C types, and the messages.
 atelier-plugin-api = { path = "api", default-features = false, features = ["serde"] }
 # The YAML plugin: checks a reformat kept the data, and converts YAML to JSON.
 yaml-rust2 = { version = "0.13", default-features = false }
 
+# The Web viewer: the web view of the system (WebView2, WKWebView) as a child of the window.
+# Linux would need WebKitGTK and a GTK window, which eframe has not.
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+wry = { version = "0.57", default-features = false, features = ["devtools"] }
+
 [target.'cfg(windows)'.dependencies]
-# Placement of the window on the monitor in use, its taskbar button, its rounded corners and
-# its crash log.
+# Placement of the window on the monitor in use, its taskbar button, its rounded corners, its
+# crash log and the files dragged out of it.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
     "Win32_System_Console",
+    "Win32_Storage_Xps",
+    "Win32_System_Ole",
     "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
 ] }
 
@@ -119,3 +131,4 @@ strip = true
 # Crates with a change of ours (see vendor/README.md).
 [patch.crates-io]
 egui_commonmark_backend = { path = "vendor/egui_commonmark_backend" }
+egui_commonmark = { path = "vendor/egui_commonmark" }

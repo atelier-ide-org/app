@@ -2,5 +2,22 @@
   "markdown.markdown_editor_only": "Markdown : éditeur seul",
   "markdown.markdown_editor_preview": "Markdown : éditeur et aperçu",
   "markdown.markdown_preview_only": "Markdown : aperçu seul",
-  "markdown.open_markdown_file": "Ouvrez un fichier Markdown"
+  "markdown.markdown_visual_editor": "Markdown : éditeur visuel",
+  "markdown.open_markdown_file": "Ouvrez un fichier Markdown",
+  "markdown.visual_add_paragraph": "Cliquez pour ajouter un paragraphe",
+  "markdown.visual_bold": "Gras (Ctrl+B)",
+  "markdown.visual_bullets": "Liste à puces",
+  "markdown.visual_code": "Code",
+  "markdown.visual_code_block": "Bloc de code",
+  "markdown.visual_heading": "Titre",
+  "markdown.visual_italic": "Italique (Ctrl+I)",
+  "markdown.visual_link": "Lien (Ctrl+K)",
+  "markdown.visual_link_text": "texte",
+  "markdown.visual_numbers": "Liste numérotée",
+  "markdown.visual_quote": "Citation",
+  "markdown.visual_rule": "Ligne de séparation",
+  "markdown.visual_start": "Cliquez ici pour commencer à écrire",
+  "markdown.visual_strike": "Barré",
+  "markdown.visual_table": "Tableau",
+  "markdown.visual_tasks": "Liste de tâches"
 }

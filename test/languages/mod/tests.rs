@@ -136,3 +136,147 @@ fn the_code_of_a_page_goes_to_the_provider_of_its_language() {
     service.update(&doc, "<p>hi</p>", 2);
     assert_eq!(js_seen.lock().unwrap().1.len(), 1);
 }
+
+/// What a fake linter of a plugin was given, and what it answers.
+#[derive(Default)]
+struct FakeLinter {
+    documents: Mutex<Vec<(PathBuf, String, u64)>>,
+    closed: Mutex<Vec<PathBuf>>,
+    found: Mutex<Option<Arc<Vec<Diagnostic>>>>,
+    /// Formats `.md` files: their text in capitals.
+    formats_md: bool,
+}
+
+impl external::External for FakeLinter {
+    fn lints(&self, path: &Path) -> bool {
+        path.extension().is_some_and(|e| e == "md")
+    }
+    fn formats(&self, path: &Path) -> bool {
+        self.formats_md && self.lints(path)
+    }
+    fn document(&self, path: &Path, _language: &str, text: &str, version: u64) {
+        self.documents
+            .lock()
+            .unwrap()
+            .push((path.to_path_buf(), text.to_string(), version));
+    }
+    fn closed(&self, path: &Path) {
+        self.closed.lock().unwrap().push(path.to_path_buf());
+    }
+    fn diagnostics(&self, _path: &Path) -> Option<Arc<Vec<Diagnostic>>> {
+        self.found.lock().unwrap().clone()
+    }
+    fn fixes(&self, _path: &Path, offset: usize) -> Vec<QuickFix> {
+        (offset < 7)
+            .then(|| QuickFix {
+                title: "Capitalize".into(),
+                edits: Vec::new(),
+            })
+            .into_iter()
+            .collect()
+    }
+    fn format(
+        &self,
+        _path: &Path,
+        _language: &str,
+        text: &str,
+    ) -> Option<Oneshot<Result<String, String>>> {
+        Some(Oneshot::ready(Ok(text.to_uppercase())))
+    }
+}
+
+#[test]
+fn plugin_linters_read_documents_of_their_files_and_their_problems_show() {
+    let service = Service::default();
+    let linter = Arc::new(FakeLinter::default());
+    service.set_externals(vec![linter.clone()]);
+    let doc = DocRef {
+        key: 1,
+        path: Some(PathBuf::from("notes/README.md")),
+        language: "markdown".into(),
+    };
+    // No provider handles Markdown: the plugin's linter makes the editor ask all the same.
+    assert!(service.assists(&doc.path, &doc.language));
+    assert!(!service.assists(&Some(PathBuf::from("a.txt")), "text"));
+    service.update(&doc, "# Title", 1);
+    service.update(&doc, "# Title", 1);
+    service.update(&doc, "# Title\n", 2);
+    assert_eq!(
+        *linter.documents.lock().unwrap(),
+        [
+            ("notes/README.md".into(), "# Title".into(), 1),
+            ("notes/README.md".into(), "# Title\n".into(), 2),
+        ]
+    );
+    assert!(service.diagnostics(&doc).is_empty());
+    let found = Diagnostic {
+        range: 2..7,
+        severity: Severity::Warning,
+        message: "Title case".into(),
+        source: "markdownlint".into(),
+    };
+    *linter.found.lock().unwrap() = Some(Arc::new(vec![found.clone()]));
+    let first = service.diagnostics(&doc);
+    assert_eq!(*first, [found]);
+    // Nothing new: the same list, so the editor does not lay it out again.
+    assert!(Arc::ptr_eq(&first, &service.diagnostics(&doc)));
+    service.close(1);
+    assert_eq!(
+        *linter.closed.lock().unwrap(),
+        [PathBuf::from("notes/README.md")]
+    );
+    // A file it does not cover, or a document without a file, stays out of it.
+    let other = DocRef {
+        key: 2,
+        path: Some(PathBuf::from("a.txt")),
+        language: "text".into(),
+    };
+    service.update(&other, "x", 1);
+    service.update(
+        &DocRef {
+            key: 3,
+            path: None,
+            language: "markdown".into(),
+        },
+        "x",
+        1,
+    );
+    assert_eq!(linter.documents.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn a_plugin_formatter_comes_first_and_the_ide_keeps_the_rest() {
+    let service = Service::default();
+    service.set_externals(vec![Arc::new(FakeLinter {
+        formats_md: true,
+        ..Default::default()
+    })]);
+    let doc = |path: &str, language: &str| DocRef {
+        key: 1,
+        path: Some(PathBuf::from(path)),
+        language: language.into(),
+    };
+    let edits = wait(service.format(&doc("a.md", "markdown"), "hello\n")).unwrap();
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].new_text, "HELLO\n");
+    // JSON is not the plugin's: the IDE formats it itself.
+    let edits = wait(service.format(&doc("a.json", "json"), "{\"a\":1}")).unwrap();
+    assert!(edits.iter().any(|e| e.new_text.contains("\"a\": 1")));
+}
+
+#[test]
+fn the_fixes_of_a_plugin_linter_come_with_alt_enter() {
+    let service = Service::default();
+    service.set_externals(vec![Arc::new(FakeLinter::default())]);
+    let doc = DocRef {
+        key: 1,
+        path: Some(PathBuf::from("a.md")),
+        language: "markdown".into(),
+    };
+    let fixes = wait(service.quick_fixes(&doc, "# title", 3));
+    assert_eq!(
+        fixes.iter().map(|f| f.title.as_str()).collect::<Vec<_>>(),
+        ["Capitalize"]
+    );
+    assert!(wait(service.quick_fixes(&doc, "# title", 20)).is_empty());
+}

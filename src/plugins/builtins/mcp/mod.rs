@@ -19,6 +19,7 @@ mod usage;
 
 pub use sessions::clock;
 
+use crate::plugins::builtins::web::remote as web;
 use crate::{
     plugins::builtin::{BuiltinPlugin, Command, Dock, Host, ToolWindow},
     ui,
@@ -684,9 +685,14 @@ impl BuiltinPlugin for McpPlugin {
             .unwrap_or_else(|e| e.into_inner())
             .set_root(host.root());
         for call in server.calls.try_iter() {
+            self.served += 1;
+            // The tools of the Web viewer answer from it, once their page is ready.
+            if web::is_web_tool(&call.tool) {
+                web::submit(call.tool, call.args, call.reply);
+                continue;
+            }
             let outcome = tools::run(host, &call.tool, &call.args);
             let _ = call.reply.send(outcome);
-            self.served += 1;
         }
     }
 

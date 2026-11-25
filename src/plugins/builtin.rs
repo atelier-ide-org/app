@@ -59,13 +59,16 @@ impl MarkKind {
     }
 }
 
-/// How the editor shows a document: source, source and preview side by side, or preview only.
+/// How the editor shows a document: source, source and preview side by side, preview only, or
+/// the rendered document edited in place (for the plugins that can, see
+/// [`BuiltinPlugin::visual_editing`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum EditorLayout {
     Text,
     #[default]
     Split,
     Preview,
+    Visual,
 }
 
 /// How the project tree shows a folder a plugin knows (a Git submodule).
@@ -152,14 +155,14 @@ pub trait Host {
     fn inspect_files(&self, _files: &[PathBuf]) -> Vec<Problem> {
         Vec::new()
     }
-    /// The selected text of the active document.
-    fn selected_text(&self) -> Option<String> {
-        None
-    }
     /// Opens a file with a range selected: 0-based line, column and length in characters.
     fn open_at(&mut self, path: PathBuf, _line: usize, _column: usize, _length: usize) {
         self.open_file(path);
     }
+    /// Opens Search Everywhere, as a double Shift does (from a web page, which keeps the keys).
+    fn search_everywhere(&mut self) {}
+    /// Opens Find in Files in the popup of Search Everywhere (Ctrl+Shift+F), with the selection.
+    fn find_in_files(&mut self) {}
     /// Asks to switch projects; unsaved documents are confirmed first.
     fn open_project(&mut self, path: PathBuf);
     /// Saves the modified documents that have a path. False if one could not be saved.
@@ -241,6 +244,12 @@ pub trait BuiltinPlugin {
         Vec::new()
     }
     fn run_command(&mut self, id: &str, host: &mut dyn Host) {}
+    /// Entries of Search Everywhere for what is typed there (an address to open), first.
+    fn query_commands(&self, query: &str) -> Vec<Command> {
+        Vec::new()
+    }
+    /// An entry of [`BuiltinPlugin::query_commands`] was chosen for `query`.
+    fn run_query_command(&mut self, id: &str, query: &str, host: &mut dyn Host) {}
     fn file_color(&self, path: &Path) -> Option<Color32> {
         None
     }
@@ -304,6 +313,11 @@ pub trait BuiltinPlugin {
     fn formatters(&self) -> &'static [(&'static str, crate::languages::format::Formatter)] {
         &[]
     }
+    /// The linters and formatters the plugin brings on top of the languages (ESLint,
+    /// Prettier…), for the files they cover.
+    fn language_tools(&self) -> Option<std::sync::Arc<dyn crate::languages::external::External>> {
+        None
+    }
     /// The schemas of the JSON files this plugin knows (`package.json` for Node.js): they check
     /// the values of those files, complete their keys and describe them under the mouse.
     fn json_schemas(&self) -> &'static [crate::languages::json::Schema] {
@@ -331,6 +345,13 @@ pub trait BuiltinPlugin {
     /// (0 to 1) when it just moved, for synchronized scrolling. The preview may edit the
     /// text, e.g. to tick a task list item.
     fn preview(&mut self, ui: &mut egui::Ui, path: &Path, text: &mut String, scroll: Option<f32>) {}
+    /// True when the plugin edits this document in its rendered form: the layout switch then
+    /// offers [`EditorLayout::Visual`].
+    fn visual_editing(&self, path: &Path) -> bool {
+        false
+    }
+    /// Draws the document rendered, and edits `text` from there.
+    fn visual_editor(&mut self, ui: &mut egui::Ui, path: &Path, text: &mut String) {}
 }
 
 /// The icon of a plugin, by the name of its folder: the one of the front matter of its
@@ -359,6 +380,7 @@ pub fn all() -> Vec<Box<dyn BuiltinPlugin>> {
         Box::new(crate::features::search::SearchPlugin::default()),
         Box::new(crate::features::problems::ProblemsPlugin::default()),
         Box::new(crate::plugins::builtins::image::ImagePlugin::default()),
+        Box::new(crate::plugins::builtins::web::WebPlugin::default()),
         Box::new(crate::plugins::builtins::k8s::K8sPlugin::default()),
         Box::new(crate::plugins::builtins::node::NodePlugin::default()),
         Box::new(crate::plugins::builtins::cargo::CargoPlugin::default()),

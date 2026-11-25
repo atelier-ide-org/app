@@ -80,7 +80,7 @@ pub fn show(
         pane.view.invalidate();
     }
     let assist = service
-        .filter(|s| s.formats(&doc.language))
+        .filter(|s| s.assists(&doc.path, &doc.language))
         .map(|service| Assist {
             service,
             doc: DocRef {

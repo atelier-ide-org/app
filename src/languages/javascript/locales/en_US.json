@@ -180,6 +180,8 @@
   "javascript.javascript_language_server": "JavaScript language server: {message}",
   "javascript.javascript_language_server_installed": "JavaScript language server installed",
   "javascript.javascript_restart_language_server": "JavaScript: Restart the Language Server",
+  "javascript.tsserver_loading_project": "tsserver: loading the project…",
+  "javascript.hover_from_module": "from “{module}”",
   "javascript.js_local_analysis": "JS: local analysis",
   "javascript.js_server_failed": "JS: server failed ({reason})",
   "javascript.json.parse": "Converts JSON into a JavaScript value.",

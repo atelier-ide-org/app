@@ -1180,10 +1180,70 @@ fn ctrl_shift_f_opens_find_in_files() {
         .drop_without_applying_deltas();
     };
     press(&mut ide, Modifiers::COMMAND | Modifiers::SHIFT);
-    assert_eq!(ide.bottom_tool.map(|t| t.id), Some("search.results"));
+    // In the popup of Search Everywhere, as IntelliJ's.
+    assert!(ide.show_palette && ide.palette_mode == PaletteMode::Text);
     assert!(!ide.find.open, "not the search of the file");
-    ide.bottom_tool = None;
+    ide.show_palette = false;
     press(&mut ide, Modifiers::COMMAND);
     assert!(ide.find.open, "Ctrl+F is still the search of the file");
-    assert!(ide.bottom_tool.is_none());
+    assert!(!ide.show_palette);
+}
+
+#[test]
+fn double_shift_opens_search_everywhere_with_the_key_events_of_shift() {
+    // egui 0.37 sends a key event for Shift itself: it is not another key between the two.
+    let mut ide = ide();
+    let ctx = egui::Context::default();
+    let shift = |pressed: bool| {
+        let modifiers = if pressed {
+            egui::Modifiers::SHIFT
+        } else {
+            egui::Modifiers::NONE
+        };
+        vec![
+            egui::Event::ModifiersChanged(modifiers),
+            egui::Event::Key {
+                key: egui::Key::ShiftLeft,
+                physical_key: Some(egui::Key::ShiftLeft),
+                pressed,
+                repeat: false,
+                modifiers,
+            },
+        ]
+    };
+    for (time, pressed) in [(0.0, true), (0.05, false), (0.1, true), (0.15, false)] {
+        ctx.run_pass(
+            egui::RawInput {
+                time: Some(time),
+                events: shift(pressed),
+                ..Default::default()
+            },
+            |ctx| ide.shortcuts(ctx),
+        )
+        .drop_without_applying_deltas();
+    }
+    assert!(ide.show_palette);
+    assert!(ide.palette_mode == PaletteMode::Everywhere);
+}
+
+#[test]
+fn find_in_files_shows_the_matches_of_the_text_only() {
+    let mut ide = ide();
+    ide.open_find_in_files();
+    assert!(ide.palette_mode == PaletteMode::Text);
+    ide.palette_query = "[package]".into();
+    let started = std::time::Instant::now();
+    let mut hits = ide.palette_hits();
+    while hits.is_empty() && started.elapsed() < std::time::Duration::from_secs(60) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        hits = ide.palette_hits();
+    }
+    assert!(!hits.is_empty());
+    // Only matches of the text, highlighted: no file, action or tab.
+    for hit in &hits {
+        assert!(matches!(hit.target, Target::Text(..)));
+        let (start, end) = hit.mark.expect("the match is highlighted");
+        let shown: String = hit.label.chars().skip(start).take(end - start).collect();
+        assert_eq!(shown, "[package]");
+    }
 }

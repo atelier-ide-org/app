@@ -280,3 +280,20 @@ fn addresses_are_found_under_the_pointer() {
     assert_eq!(s.url_at(text, text.len() - 1), Some(last..text.len()));
     assert_eq!(s.url_at(text, text.len()), None);
 }
+
+/// A text changed outside the editor without changing its length (an AI, a task ticked in the
+/// Markdown preview) is indexed again: the old line starts would cut it inside a character.
+#[test]
+fn a_text_changed_elsewhere_with_the_same_length_is_indexed_again() {
+    let before = "aé\nbbbb\ncc";
+    let after = "aébbbb\n\ncc";
+    assert_eq!(before.len(), after.len());
+    let mut s = state(before);
+    assert_eq!(s.line(before, 1), "bbbb");
+    s.sync(after);
+    assert_eq!(s.line_count(), 3);
+    assert_eq!(s.line(after, 0), "aébbbb");
+    // A word asked for past the end of its line, or inside a character, does not panic.
+    assert_eq!(s.word_at(after, 2), 0..7);
+    assert_eq!(column_of("aé", 2), 1);
+}

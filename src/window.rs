@@ -45,6 +45,55 @@ pub fn spawn_detached(command: &mut Command) -> io::Result<Child> {
     command.spawn()
 }
 
+thread_local! {
+    /// The handle of the main window, for the native views placed in it (the Web viewer).
+    static MAIN: std::cell::Cell<Option<raw_window_handle::RawWindowHandle>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Keeps the handle of the main window eframe created, on the thread of its interface.
+pub fn remember_main(handle: &impl raw_window_handle::HasWindowHandle) {
+    MAIN.set(handle.window_handle().ok().map(|h| h.as_raw()));
+}
+
+/// The main window, as a parent for native views: on the thread of the interface only.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+pub fn main_window() -> Option<MainWindow> {
+    MAIN.get().map(MainWindow)
+}
+
+/// A picture of a part of the main window, in pixels of the window: `[x, y, width, height]`.
+/// Width, height and RGBA pixels; None when the system cannot take it (or on another system
+/// than Windows, for now). The web views placed in the window are in it.
+pub fn capture_main(rect: [i32; 4]) -> Option<(u32, u32, Vec<u8>)> {
+    #[cfg(windows)]
+    {
+        let raw_window_handle::RawWindowHandle::Win32(handle) = MAIN.get()? else {
+            return None;
+        };
+        imp::capture(handle.hwnd.get() as usize, rect)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = rect;
+        None
+    }
+}
+
+/// The handle of the main window, borrowed while it lives (the whole run of the IDE).
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+#[derive(Clone, Copy)]
+pub struct MainWindow(raw_window_handle::RawWindowHandle);
+
+impl raw_window_handle::HasWindowHandle for MainWindow {
+    fn window_handle(
+        &self,
+    ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        // The window outlives the views placed in it: they go with the plugins, before it.
+        Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(self.0) })
+    }
+}
+
 /// The native window of the IDE.
 pub struct Window {
     #[cfg(windows)]
@@ -138,6 +187,21 @@ impl Window {
         #[cfg(not(windows))]
         None
     }
+
+    /// Hands `paths` to the system as a drag of files, which the desktop, a folder or a web
+    /// page receives as copies. Returns once they are dropped or the drag is given up; false
+    /// when the system cannot take them (or another system than Windows, for now).
+    pub fn drag_files(&self, paths: &[std::path::PathBuf]) -> bool {
+        #[cfg(windows)]
+        {
+            imp::drag_files(self.hwnd, paths)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = paths;
+            false
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -147,6 +211,7 @@ mod imp {
         Win32::{
             Foundation::{HWND, POINT},
             Graphics::Dwm::{DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute},
+            Graphics::Gdi::ScreenToClient,
             Graphics::Gdi::{
                 GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
                 MonitorFromPoint, MonitorFromWindow,
@@ -154,10 +219,15 @@ mod imp {
             System::Com::{
                 CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
             },
+            System::Ole::{DROPEFFECT, DROPEFFECT_COPY, OleInitialize},
             UI::{
                 HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI},
+                Shell::{
+                    Common::ITEMIDLIST, ILCreateFromPathW, ILFree, SHCreateDataObject, SHDoDragDrop,
+                },
                 WindowsAndMessaging::{
-                    GetCursorPos, IsIconic, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+                    GetCursorPos, IsIconic, PostMessageW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+                    SetWindowPos, WM_LBUTTONUP, WM_MOUSEMOVE,
                 },
             },
         },
@@ -270,4 +340,164 @@ mod imp {
             (methods.release)(list);
         }
     }
+
+    /// The data object of the shell for `paths`, as Explorer gives when its files are
+    /// dragged or copied: it holds their list (`CF_HDROP`), their names and their places, so
+    /// every program that receives files knows it. To be released with [`release`].
+    pub fn data_object(paths: &[std::path::PathBuf]) -> Option<*mut c_void> {
+        use std::os::windows::ffi::OsStrExt;
+        let items: Vec<*mut ITEMIDLIST> = paths
+            .iter()
+            .filter_map(|path| {
+                // Without the `\\?\` of canonical paths, which the shell does not read.
+                let path = crate::project::simplify(path);
+                let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+                let item = unsafe { ILCreateFromPathW(wide.as_ptr()) };
+                (!item.is_null()).then_some(item)
+            })
+            .collect();
+        let mut object = null_mut();
+        if items.len() == paths.len() && !items.is_empty() {
+            // Full lists of items are relative to the desktop, whose own list is empty: that
+            // way the files may be in different folders.
+            let desktop = [0u16];
+            let list: Vec<*const ITEMIDLIST> = items.iter().map(|&i| i.cast_const()).collect();
+            let made = unsafe {
+                SHCreateDataObject(
+                    desktop.as_ptr().cast(),
+                    list.len() as u32,
+                    list.as_ptr(),
+                    null_mut(),
+                    &IID_IDATA_OBJECT,
+                    &mut object,
+                )
+            };
+            if made < 0 {
+                object = null_mut();
+            }
+        }
+        for item in items {
+            unsafe { ILFree(item) };
+        }
+        (!object.is_null()).then_some(object)
+    }
+
+    /// Releases a COM object: `Release` is the third method of every interface.
+    pub unsafe fn release(object: *mut c_void) {
+        type Release = unsafe extern "system" fn(*mut c_void) -> u32;
+        unsafe {
+            let methods = *(object as *const *const usize);
+            let release: Release = std::mem::transmute(*methods.add(2));
+            release(object);
+        }
+    }
+
+    /// The pixels of `[x, y, width, height]` of the window, as it would paint them: the web
+    /// views, which DirectComposition draws, are in it.
+    pub fn capture(window: usize, rect: [i32; 4]) -> Option<(u32, u32, Vec<u8>)> {
+        use windows_sys::Win32::{
+            Foundation::RECT,
+            Graphics::Gdi::{
+                BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleBitmap, CreateCompatibleDC,
+                DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC, SelectObject,
+            },
+            Storage::Xps::{PW_CLIENTONLY, PrintWindow},
+            UI::WindowsAndMessaging::{GetClientRect, PW_RENDERFULLCONTENT},
+        };
+        unsafe {
+            let mut client = RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            GetClientRect(hwnd(window), &mut client);
+            let (width, height) = (client.right, client.bottom);
+            if width <= 0 || height <= 0 {
+                return None;
+            }
+            let screen = GetDC(null_mut());
+            let dc = CreateCompatibleDC(screen);
+            let bitmap = CreateCompatibleBitmap(screen, width, height);
+            let old = SelectObject(dc, bitmap);
+            let printed = PrintWindow(hwnd(window), dc, PW_CLIENTONLY | PW_RENDERFULLCONTENT) != 0;
+            SelectObject(dc, old);
+            let mut info: BITMAPINFO = std::mem::zeroed();
+            info.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
+            info.bmiHeader.biWidth = width;
+            // Negative: the rows from the top.
+            info.bmiHeader.biHeight = -height;
+            info.bmiHeader.biPlanes = 1;
+            info.bmiHeader.biBitCount = 32;
+            info.bmiHeader.biCompression = BI_RGB;
+            let mut pixels = vec![0u8; width as usize * height as usize * 4];
+            let read = GetDIBits(
+                dc,
+                bitmap,
+                0,
+                height as u32,
+                pixels.as_mut_ptr().cast(),
+                &mut info,
+                DIB_RGB_COLORS,
+            );
+            DeleteObject(bitmap);
+            DeleteDC(dc);
+            ReleaseDC(null_mut(), screen);
+            if !printed || read == 0 {
+                return None;
+            }
+            // The part asked, within the window, from BGRA to RGBA.
+            let [x, y, w, h] = rect;
+            let (x0, y0) = (x.clamp(0, width), y.clamp(0, height));
+            let (x1, y1) = ((x + w).clamp(0, width), (y + h).clamp(0, height));
+            if x1 <= x0 || y1 <= y0 {
+                return None;
+            }
+            let mut out = Vec::with_capacity(((x1 - x0) * (y1 - y0) * 4) as usize);
+            for row in y0..y1 {
+                let start = ((row * width + x0) * 4) as usize;
+                for px in pixels[start..start + ((x1 - x0) * 4) as usize].chunks_exact(4) {
+                    out.extend_from_slice(&[px[2], px[1], px[0], 255]);
+                }
+            }
+            Some(((x1 - x0) as u32, (y1 - y0) as u32, out))
+        }
+    }
+
+    const IID_IDATA_OBJECT: GUID = GUID::from_u128(0x0000010e_0000_0000_c000_000000000046);
+
+    pub fn drag_files(window: usize, paths: &[std::path::PathBuf]) -> bool {
+        unsafe {
+            // Done by winit for the files dropped on the window, most of the time.
+            let _ = OleInitialize(null_mut());
+            let Some(object) = data_object(paths) else {
+                return false;
+            };
+            // The drag of the shell: its own pictures of the files under the pointer, and the
+            // buttons and keys that drop or give up. Copies only: a project file dropped on
+            // the desktop stays in the project.
+            let mut effect: DROPEFFECT = 0;
+            let done = SHDoDragDrop(
+                hwnd(window),
+                object,
+                null_mut(),
+                DROPEFFECT_COPY,
+                &mut effect,
+            );
+            release(object);
+            // The system took the release of the button: the window still thinks it held. The
+            // pointer first, out of the window by now: egui drops a button without a pointer.
+            let mut at = POINT { x: 0, y: 0 };
+            GetCursorPos(&mut at);
+            ScreenToClient(hwnd(window), &mut at);
+            let position = (at.x as u16 as u32 | ((at.y as u16 as u32) << 16)) as isize;
+            PostMessageW(hwnd(window), WM_MOUSEMOVE, 0, position);
+            PostMessageW(hwnd(window), WM_LBUTTONUP, 0, position);
+            done >= 0
+        }
+    }
 }
+
+#[cfg(test)]
+#[path = "../test/window/tests.rs"]
+mod tests;

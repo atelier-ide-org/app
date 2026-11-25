@@ -23,36 +23,35 @@ pub fn newline(ui: &mut Ui) {
 
 pub fn bullet_point(ui: &mut Ui) {
     let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(width_body_space(ui) * 4.0, height_body(ui)),
+        egui::vec2(width_body_space(ui) * 4.0, marker_height(ui)),
         Sense::hover(),
     );
     ui.painter().circle_filled(
         rect.center(),
-        rect.height() / 6.0,
+        height_body(ui) / 6.0,
         ui.visuals().strong_text_color(),
     );
 }
 
 pub fn bullet_point_hollow(ui: &mut Ui) {
     let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(width_body_space(ui) * 4.0, height_body(ui)),
+        egui::vec2(width_body_space(ui) * 4.0, marker_height(ui)),
         Sense::hover(),
     );
     ui.painter().circle(
         rect.center(),
-        rect.height() / 6.0,
+        height_body(ui) / 6.0,
         egui::Color32::TRANSPARENT,
         egui::Stroke::new(0.6, ui.visuals().strong_text_color()),
     );
 }
 
 pub fn number_point(ui: &mut Ui, number: &str) {
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(width_body_space(ui) * 4.0, height_body(ui)),
-        Sense::hover(),
-    );
+    let space = width_body_space(ui);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(space * 5.0, marker_height(ui)), Sense::hover());
+    // Atelier: a space between the number and the text.
     ui.painter().text(
-        rect.right_center(),
+        rect.right_center() - egui::vec2(space, 0.0),
         egui::Align2::RIGHT_CENTER,
         format!("{number}."),
         TextStyle::Body.resolve(ui.style()),
@@ -77,6 +76,13 @@ pub fn footnote(ui: &mut Ui, text: &str) {
         TextStyle::Small.resolve(ui.style()),
         ui.visuals().strong_text_color(),
     );
+}
+
+/// Atelier: the height of the row of a list item, so that its marker is drawn at the middle of
+/// the text beside it (the text is centered in a row of the height of the widgets, and the
+/// marker was drawn at the middle of a row of text only, a few points higher).
+fn marker_height(ui: &Ui) -> f32 {
+    height_body(ui).max(ui.spacing().interact_size.y)
 }
 
 fn height_body(ui: &Ui) -> f32 {

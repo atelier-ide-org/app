@@ -52,6 +52,8 @@ struct Shared {
     queued: Vec<Value>,
     /// The last lines the server wrote on its standard error.
     log: Vec<String>,
+    /// The work the server reports as going on (`$/progress`), by token: its title.
+    progress: HashMap<String, String>,
 }
 
 pub struct Client {
@@ -87,7 +89,8 @@ impl Client {
         let mut command = Command::new(&launch.program);
         command
             .args(&launch.args)
-            .current_dir(root)
+            // cmd.exe, which runs the `.cmd` launchers, refuses a verbatim `\\?\` folder.
+            .current_dir(crate::project::simplify(root))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -190,7 +193,10 @@ impl Client {
                     "typeHierarchy": {},
                     "publishDiagnostics": {"relatedInformation": false}
                 },
-                "workspace": {"workspaceFolders": true, "configuration": false}
+                "workspace": {"workspaceFolders": true, "configuration": false},
+                // The server says when it is loading the project: until then its answers are
+                // incomplete, or late.
+                "window": {"workDoneProgress": true}
             }
         });
         let weak = Arc::downgrade(&client);
@@ -229,6 +235,15 @@ impl Client {
 
     pub fn ready(&self) -> bool {
         !self.exited() && self.shared.lock().is_ok_and(|s| s.ready)
+    }
+
+    /// The title of the work the server reports as going on (loading the project, indexing),
+    /// None when it is idle.
+    pub fn busy(&self) -> Option<String> {
+        let shared = self.shared.lock().ok()?;
+        let mut titles: Vec<&String> = shared.progress.values().collect();
+        titles.sort();
+        titles.first().map(|t| (*t).clone())
     }
 
     /// The reason the server refused to start, once it did.
@@ -382,11 +397,13 @@ fn read_message(reader: &mut impl BufRead) -> Result<Option<Value>> {
 }
 
 fn handle_message(message: Value, shared: &Arc<Mutex<Shared>>, client: Option<&Client>) {
-    let id = message.get("id").and_then(Value::as_u64);
     let method = message.get("method").and_then(Value::as_str);
-    match (id, method) {
+    // Our requests have numbers; a request of the server may have a string, answered with it.
+    let raw_id = message.get("id").filter(|i| !i.is_null()).cloned();
+    match (raw_id, method) {
         // The answer to one of our requests.
-        (Some(id), None) => {
+        (Some(raw_id), None) => {
+            let Some(id) = raw_id.as_u64() else { return };
             let callback = shared.lock().ok().and_then(|mut s| s.callbacks.remove(&id));
             if let Some(callback) = callback {
                 match message.get("error") {
@@ -420,6 +437,26 @@ fn handle_message(message: Value, shared: &Arc<Mutex<Shared>>, client: Option<&C
             };
             if let Some(client) = client {
                 let _ = client.write(&json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
+        }
+        (None, Some("$/progress")) => {
+            let params = &message["params"];
+            let token = match &params["token"] {
+                Value::String(t) => t.clone(),
+                other => other.to_string(),
+            };
+            let value = &params["value"];
+            if let Ok(mut s) = shared.lock() {
+                match value["kind"].as_str() {
+                    Some("begin") => {
+                        let title = value["title"].as_str().unwrap_or("").to_string();
+                        s.progress.insert(token, title);
+                    }
+                    Some("end") => {
+                        s.progress.remove(&token);
+                    }
+                    _ => {}
+                }
             }
         }
         (None, Some("textDocument/publishDiagnostics")) => {

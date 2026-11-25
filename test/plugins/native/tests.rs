@@ -230,3 +230,145 @@ fn the_icons_of_the_files_come_from_the_extensions_folder() {
     assert!(icon.variant(true).unwrap().uri.contains("dark"));
     assert!(icon.variant(false).unwrap().uri.contains("light"));
 }
+
+#[test]
+fn problems_of_a_plugin_are_placed_in_the_text_by_utf16_columns() {
+    use atelier_plugin_api::protocol::{Diagnostic as Found, Severity as Level};
+    // `é` is one UTF-16 unit and two bytes; `😀` is two units and four bytes.
+    let text = "let é = 1;\nlet 😀x = 2;\n";
+    let found = |line, column, end_column, severity, code: Option<&str>| Found {
+        line,
+        column,
+        end_line: line,
+        end_column,
+        severity,
+        message: "unused".into(),
+        source: "eslint".into(),
+        code: code.map(String::from),
+        fixes: Vec::new(),
+    };
+    let placed = tools::place(
+        text,
+        &[
+            found(1, 6, 7, Level::Error, None),
+            found(0, 4, 5, Level::Warning, Some("no-unused-vars")),
+        ],
+    );
+    assert_eq!(&text[placed[0].range.clone()], "é");
+    assert_eq!(placed[0].message, "unused (no-unused-vars)");
+    assert_eq!(placed[0].severity, crate::languages::Severity::Warning);
+    assert_eq!(&text[placed[1].range.clone()], "x");
+    assert_eq!(placed[1].message, "unused");
+}
+
+/// The Lint plugin, when it was built next to the IDE (`plugins/lint`), with a project that has
+/// ESLint and Prettier (`LINT_TEST_JS`, as for the tests of the plugin): a document goes to the
+/// plugin, and its problems and its formatting come back through the interface.
+#[test]
+fn a_plugin_lints_and_formats_documents_through_the_interface() {
+    let Some(root) = std::env::var_os("LINT_TEST_JS").map(PathBuf::from) else {
+        eprintln!("skipped: LINT_TEST_JS names no project");
+        return;
+    };
+    let library = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("plugins/lint/target/debug")
+        .join(super::super::library_file("lint"));
+    if !library.is_file() {
+        eprintln!("skipped: no plugin built at {}", library.display());
+        return;
+    }
+    let mut manifest = manifest(library.parent().unwrap(), "lint");
+    manifest.id = "lint".into();
+    let plugin = load(&manifest).unwrap();
+    plugin.instance.shared.project.lock().unwrap().root = Some(root.clone());
+    let tools = plugin.language_tools().expect("the plugin lints");
+    let file = root.join("through-the-interface.js");
+    let text = "let unused = 2;\n";
+    std::fs::write(&file, text).unwrap();
+    assert!(tools.lints(&file) && tools.formats(&file));
+    tools.document(&file, "javascript", text, 1);
+    let started = std::time::Instant::now();
+    let found = loop {
+        if let Some(found) = tools.diagnostics(&file) {
+            break found;
+        }
+        assert!(started.elapsed().as_secs() < 30, "no problems came back");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let unused = found
+        .iter()
+        .find(|d| d.message.contains("no-unused-vars"))
+        .expect("ESLint found the unused variable");
+    assert_eq!(&text[unused.range.clone()], "unused");
+    let answer = tools
+        .format(&file, "javascript", "let  a={b:1}")
+        .expect("Prettier or Oxfmt takes it");
+    let started = std::time::Instant::now();
+    let formatted = loop {
+        if let Some(formatted) = answer.take() {
+            break formatted;
+        }
+        assert!(started.elapsed().as_secs() < 30, "no formatting came back");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert_eq!(formatted.unwrap(), "let a = { b: 1 };\n");
+    // Its fixes, on the problem: ESLint's suggestion, and the comment that turns the rule off.
+    let fixes = tools.fixes(&file, unused.range.start);
+    assert!(
+        fixes.iter().any(|f| f.edits[0]
+            .new_text
+            .contains("eslint-disable-next-line no-unused-vars")),
+        "{fixes:?}"
+    );
+    // Elsewhere, none.
+    assert!(tools.fixes(&file, text.len()).is_empty());
+    // A file none of its tools reads stays with the IDE.
+    assert!(
+        !tools.lints(Path::new("a.rs")) && tools.format(Path::new("a.rs"), "rust", "").is_none()
+    );
+    std::fs::remove_file(&file).ok();
+}
+
+#[test]
+fn fixes_of_a_plugin_are_offered_on_their_problem_and_all_at_once() {
+    use atelier_plugin_api::protocol::{Diagnostic as Found, Edit, Fix};
+    let text = "var a = 1;\nvar b = 2;\n";
+    let found = |line: u32, preferred: bool| Found {
+        line,
+        column: 0,
+        end_line: line,
+        end_column: 10,
+        source: "eslint".into(),
+        code: Some("no-var".into()),
+        fixes: vec![Fix {
+            title: format!("fix {line}"),
+            edits: vec![Edit {
+                line,
+                column: 0,
+                end_line: line,
+                end_column: 3,
+                text: "let".into(),
+            }],
+            preferred,
+        }],
+        ..Found::default()
+    };
+    let placed = tools::place_fixes(text, &[found(0, true), found(1, true)]);
+    let on_first = tools::fixes_at(&placed, 4);
+    assert_eq!(on_first[0].title, "fix 0");
+    assert_eq!(on_first[0].edits[0].range, 0..3);
+    // Two fixes of ESLint itself: both at once, the second edit on the second line.
+    let all = on_first.last().unwrap();
+    assert!(all.title.contains("eslint"), "{}", all.title);
+    assert_eq!(
+        all.edits
+            .iter()
+            .map(|e| e.range.clone())
+            .collect::<Vec<_>>(),
+        [0..3, 11..14]
+    );
+    // Off the problems, nothing; suggestions alone are not applied to the whole file.
+    assert!(tools::fixes_at(&placed, 30).is_empty());
+    let suggestions = tools::place_fixes(text, &[found(0, false), found(1, false)]);
+    assert_eq!(tools::fixes_at(&suggestions, 4).len(), 1);
+}
