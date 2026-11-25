@@ -325,6 +325,7 @@ pub fn eval_body(script: &str) -> String {
 }
 
 /// Run in every page: its console and uncaught errors go to the IDE, for `web_console`.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 pub const CONSOLE: &str = r#"(() => {
   if (window.__atelierConsole) return;
   window.__atelierConsole = true;

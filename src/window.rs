@@ -57,6 +57,7 @@ pub fn remember_main(handle: &impl raw_window_handle::HasWindowHandle) {
 }
 
 /// The main window, as a parent for native views: on the thread of the interface only.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 pub fn main_window() -> Option<MainWindow> {
     MAIN.get().map(MainWindow)
 }
@@ -80,6 +81,7 @@ pub fn capture_main(rect: [i32; 4]) -> Option<(u32, u32, Vec<u8>)> {
 }
 
 /// The handle of the main window, borrowed while it lives (the whole run of the IDE).
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 #[derive(Clone, Copy)]
 pub struct MainWindow(raw_window_handle::RawWindowHandle);
 
