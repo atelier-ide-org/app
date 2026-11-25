@@ -347,7 +347,7 @@ fn export_location(file: &Path, imported: &str) -> Option<Location> {
     Some(Location::in_text(Some(file.to_path_buf()), &text, range))
 }
 
-fn export_range(analysis: &Analysis, imported: &str) -> Option<Range<usize>> {
+pub(crate) fn export_range(analysis: &Analysis, imported: &str) -> Option<Range<usize>> {
     if imported == "default" {
         let mut cursor = analysis.root().walk();
         for statement in analysis.root().named_children(&mut cursor) {

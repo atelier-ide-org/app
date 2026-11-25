@@ -35,6 +35,8 @@ mermaid-rs-renderer = { version = "0.3", default-features = false, features = ["
 egui_commonmark = { version = "0.26", features = ["better_syntax_highlighting", "svg"] }
 # The parser of egui_commonmark: where the HTML of a Markdown document is.
 pulldown-cmark = { version = "0.13", default-features = false }
+# A fast hash of the text of a document, to tell that it changed outside the editor.
+foldhash = "0.2"
 # The name of an installed font and whether it is monospaced.
 ttf-parser = "0.25"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
@@ -129,3 +131,4 @@ strip = true
 # Crates with a change of ours (see vendor/README.md).
 [patch.crates-io]
 egui_commonmark_backend = { path = "vendor/egui_commonmark_backend" }
+egui_commonmark = { path = "vendor/egui_commonmark" }

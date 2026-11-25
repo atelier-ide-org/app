@@ -133,7 +133,9 @@ pub fn parse(text: &str, delimiter: char) -> Vec<Vec<String>> {
 /// Numbers compare as numbers, everything else as text without case.
 fn compare(a: &str, b: &str) -> Ordering {
     match (a.trim().parse::<f64>(), b.trim().parse::<f64>()) {
-        (Ok(x), Ok(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+        // `total_cmp`: a `NaN` cell equal to every number would make the order inconsistent, and
+        // the sort panics on that.
+        (Ok(x), Ok(y)) => x.total_cmp(&y),
         (Ok(_), Err(_)) => Ordering::Less,
         (Err(_), Ok(_)) => Ordering::Greater,
         _ => a.to_lowercase().cmp(&b.to_lowercase()),

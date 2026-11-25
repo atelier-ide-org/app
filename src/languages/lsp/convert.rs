@@ -112,6 +112,10 @@ pub(crate) fn split_hover(markdown: &str) -> (String, String) {
             continue;
         }
         if in_code && first_block {
+            // tsserver follows `(alias) function f(…)` with the `import f` line that brings it.
+            if title.starts_with("(alias)") && line.trim_start().starts_with("import ") {
+                continue;
+            }
             if !title.is_empty() {
                 title.push(' ');
             }

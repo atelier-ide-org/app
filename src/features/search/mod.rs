@@ -17,6 +17,14 @@ use std::{
     thread,
 };
 
+/// A query sent from the Find in Files popup (Ctrl+Enter): searched when the window shows.
+static PENDING: Mutex<Option<String>> = Mutex::new(None);
+
+/// Shows the results of `query` in the Find window: all of them, and the replacement.
+pub fn show_all(query: String) {
+    *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some(query);
+}
+
 pub static TOOL_WINDOWS: [ToolWindow; 1] = [ToolWindow {
     id: "search.results",
     title: crate::i18n::Text("search.find"),
@@ -185,7 +193,7 @@ impl BuiltinPlugin for SearchPlugin {
     fn shortcuts(&mut self, ctx: &egui::Context, host: &mut dyn Host) {
         use egui::{Key, Modifiers};
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::F)) {
-            self.open(host);
+            host.find_in_files();
         }
     }
 
@@ -198,7 +206,7 @@ impl BuiltinPlugin for SearchPlugin {
 
     fn run_command(&mut self, id: &str, host: &mut dyn Host) {
         if id == "search.project" {
-            self.open(host);
+            host.find_in_files();
         }
     }
 
@@ -206,6 +214,11 @@ impl BuiltinPlugin for SearchPlugin {
         let t = ui::theme(ui.ctx());
         let ctx = ui.ctx().clone();
         let mut run = false;
+        if let Some(query) = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            self.query = query;
+            self.focus = true;
+            run = true;
+        }
         #[cfg(debug_assertions)]
         if !self.searched
             && let Ok(query) = std::env::var("ATELIER_SHOT_SEARCH")
@@ -454,18 +467,5 @@ impl BuiltinPlugin for SearchPlugin {
         if let Some((path, line, column, length)) = open {
             host.open_at(path, line, column, length);
         }
-    }
-}
-
-impl SearchPlugin {
-    fn open(&mut self, host: &mut dyn Host) {
-        if let Some(text) = host
-            .selected_text()
-            .filter(|t| !t.contains('\n') && t.len() < 200)
-        {
-            self.query = text;
-        }
-        self.focus = true;
-        host.show_tool_window(&TOOL_WINDOWS[0]);
     }
 }

@@ -15,6 +15,7 @@ pub(crate) mod navigate;
 pub(crate) mod rename;
 pub(crate) mod server;
 pub(crate) mod symbols;
+pub(crate) mod usages;
 
 use crate::languages::{
     Completion, CompletionItem, Diagnostic, DocRef, FileEdit, Hover, Location, Oneshot, Provider,
@@ -226,7 +227,6 @@ impl JavaScript {
                     navigate::definition(text, offset, doc.path.as_deref())
                 }
                 "textDocument/typeDefinition" => navigate::type_definition(text, offset),
-                "textDocument/references" => navigate::references(text, offset),
                 _ => Vec::new(),
             }
         };
@@ -407,7 +407,12 @@ impl Provider for JavaScript {
         } else {
             None
         };
-        let client = self.client().filter(|c| c.ready()).cloned();
+        // While the project loads, the server answers only once it is loaded: the local
+        // completion does not make the typing wait.
+        let client = self
+            .client()
+            .filter(|c| c.ready() && c.busy().is_none())
+            .cloned();
         let data = self.docs.get(&doc.key);
         let (
             Some(client),
@@ -455,7 +460,7 @@ impl Provider for JavaScript {
     fn hover(&mut self, doc: &DocRef, text: &str, offset: usize) -> Oneshot<Option<Hover>> {
         let _dialect = analysis::use_dialect(Dialect::of(doc.path.as_deref(), &doc.language));
         let native = if Self::native(&doc.language) {
-            hover::hover(text, offset)
+            hover::hover_in(text, offset, doc.path.as_deref())
         } else {
             None
         };
@@ -746,14 +751,56 @@ impl Provider for JavaScript {
         answer
     }
 
+    /// The usages the server finds, with those the local analysis finds in the files of the
+    /// project: tsserver only knows the open files when there is no `tsconfig.json` or
+    /// `jsconfig.json`, and nothing at all of a project it cannot run in (WSL).
     fn references(&mut self, doc: &DocRef, text: &str, offset: usize) -> Oneshot<Vec<Location>> {
-        self.locate(
-            doc,
-            text,
-            offset,
-            "textDocument/references",
-            json!({"context": {"includeDeclaration": false}}),
-        )
+        let answer = Oneshot::pending();
+        let slot = answer.clone();
+        let client = self.client().filter(|c| c.ready()).cloned();
+        let target = self
+            .docs
+            .get(&doc.key)
+            .and_then(|d| d.uri.clone().filter(|_| d.opened));
+        let local = Self::native(&doc.language);
+        let dialect = Dialect::of(doc.path.as_deref(), &doc.language);
+        let (text, path, root, repaint) = (
+            text.to_string(),
+            doc.path.clone(),
+            self.root.clone(),
+            self.repaint.clone(),
+        );
+        // Reading the files of the project takes a while: not on the interface thread.
+        std::thread::spawn(move || {
+            let mut native = Vec::new();
+            if local {
+                let _dialect = analysis::use_dialect(dialect);
+                native = navigate::references(&text, offset);
+                if let Some(path) = &path {
+                    native.extend(usages::project_references(&text, offset, path, &root));
+                }
+            }
+            let (Some(client), Some(uri)) = (client, target) else {
+                slot.fulfill(native);
+                repaint();
+                return;
+            };
+            let (line, character) = to_position(&text, offset);
+            let params = json!({
+                "textDocument": {"uri": uri},
+                "position": {"line": line, "character": character},
+                "context": {"includeDeclaration": false},
+            });
+            let uri_for_answer = uri.clone();
+            client.request("textDocument/references", params, move |result| {
+                let from_server = result
+                    .map(|r| locations_from_server(&r, &uri_for_answer, &text))
+                    .unwrap_or_default();
+                slot.fulfill(merge_locations(from_server, native));
+                repaint();
+            });
+        });
+        answer
     }
 
     /// tsserver formats with the indentation the file already uses.
@@ -879,6 +926,9 @@ impl Provider for JavaScript {
         match &self.server {
             Server::NotStarted => String::new(),
             Server::Starting(_) => "tsserver…".into(),
+            Server::Running(client) if client.ready() && client.busy().is_some() => {
+                tr!("javascript.tsserver_loading_project").into()
+            }
             Server::Running(client) if client.ready() => "tsserver".into(),
             Server::Running(_) => "tsserver…".into(),
             Server::Missing => tr!("javascript.js_local_analysis").into(),
@@ -888,6 +938,21 @@ impl Provider for JavaScript {
             ),
         }
     }
+}
+
+/// The places of `first`, then those of `more` that are not in it: the same place may come as
+/// a path from one and as the document (None) from the other only for the document itself,
+/// which both give as None.
+fn merge_locations(first: Vec<Location>, more: Vec<Location>) -> Vec<Location> {
+    let key = |l: &Location| (l.path.as_deref().map(usages::path_key), l.line, l.column);
+    let mut seen: std::collections::HashSet<_> = first.iter().map(key).collect();
+    let mut all = first;
+    for place in more {
+        if seen.insert(key(&place)) {
+            all.push(place);
+        }
+    }
+    all
 }
 
 /// The commands of JavaScript support in Search Everywhere.

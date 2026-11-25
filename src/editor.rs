@@ -71,6 +71,9 @@ pub struct EditorState {
     lines: Vec<usize>,
     /// Text length the index was built for; `usize::MAX` forces a rebuild.
     indexed_len: usize,
+    /// Hash of the text the index was built for: a text changed outside the editor without
+    /// changing its length (by an AI, a ticked task of the preview…) is indexed again too.
+    indexed_hash: u64,
     /// Length in columns of the longest line, for the horizontal scroll range.
     longest: usize,
     undo: Vec<Change>,
@@ -143,6 +146,7 @@ impl Default for EditorState {
             preferred_column: None,
             lines: vec![0],
             indexed_len: usize::MAX,
+            indexed_hash: 0,
             longest: 0,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -532,6 +536,12 @@ fn allowed_when_read_only(event: &egui::Event) -> bool {
     }
 }
 
+/// A fast hash of the text, to tell that it changed.
+fn text_hash(text: &str) -> u64 {
+    use std::hash::BuildHasher as _;
+    foldhash::fast::FixedState::with_seed(0).hash_one(text)
+}
+
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
@@ -543,7 +553,8 @@ fn display(line: &str) -> String {
 
 /// Display column of byte `offset` in `line`.
 fn column_of(line: &str, offset: usize) -> usize {
-    line[..offset.min(line.len())]
+    // An offset computed for an older text may fall inside a character.
+    line[..line.floor_char_boundary(offset)]
         .chars()
         .map(|c| if c == '\t' { TAB } else { 1 })
         .sum()
@@ -688,9 +699,11 @@ impl EditorState {
     }
 
     fn sync(&mut self, text: &str) {
-        if self.indexed_len == text.len() {
+        let hash = text_hash(text);
+        if self.indexed_len == text.len() && self.indexed_hash == hash {
             return;
         }
+        self.indexed_hash = hash;
         self.lines = std::iter::once(0)
             .chain(text.match_indices('\n').map(|(i, _)| i + 1))
             .collect();
@@ -896,11 +909,13 @@ impl EditorState {
         let mut end = self
             .lines
             .get(index + 1)
-            .map_or(text.len(), |&next| next - 1);
+            .map_or(text.len(), |&next| next - 1)
+            // Never past the text, even with an index of an older one.
+            .min(text.len());
         if end > start && text.as_bytes()[end - 1] == b'\r' {
             end -= 1;
         }
-        start..end
+        start.min(end)..end
     }
 
     fn line<'t>(&self, text: &'t str, index: usize) -> &'t str {
@@ -981,6 +996,7 @@ impl EditorState {
             *start = (*start as isize + delta) as usize;
         }
         self.indexed_len = text.len();
+        self.indexed_hash = text_hash(text);
         self.rev += 1;
         // Collapsed regions after the edit move with the text; the ones it touches open.
         self.folded.retain_mut(|open| {
@@ -1213,6 +1229,11 @@ impl EditorState {
 
     fn word_at(&self, text: &str, pos: usize) -> Range<usize> {
         let line = self.line_range(text, self.line_of(pos));
+        // On the CR of a line that ends with CR LF, or an offset of an older text.
+        let pos = text.floor_char_boundary(pos.clamp(line.start, line.end));
+        if pos < line.start {
+            return pos..pos;
+        }
         let mut start = pos;
         for (i, c) in text[line.start..pos].char_indices().rev() {
             if !is_word(c) {
@@ -3142,7 +3163,8 @@ impl EditorState {
                         pos2(x - gutter - 2.0 * char_width, y - row),
                         pos2(x + 4.0 * char_width, y + 2.0 * row),
                     );
-                    ui.scroll_to_rect(target, None);
+                    // At once: a jump (Ctrl + click, a usage, a result) is not animated.
+                    ui.scroll_to_rect_animation(target, None, egui::style::ScrollAnimation::none());
                 }
                 let _: Color32 = t.text;
             });

@@ -2,14 +2,121 @@
 //! member of a built-in or local type does.
 
 use super::{
-    analysis::{Analysis, Decl, DeclKind, Ty},
+    analysis::{Analysis, Decl, DeclKind, Dialect, Ty, use_dialect},
     builtins,
     complete::MAX_TEXT,
+    navigate, usages,
 };
 use crate::languages::Hover;
+use std::path::Path;
 
 fn collapse(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The tooltip at `offset` of the file `path`: [`hover`], and what needs the other files of the
+/// project: a name imported from another file is described by its declaration there.
+pub fn hover_in(text: &str, offset: usize, path: Option<&Path>) -> Option<Hover> {
+    if text.len() > MAX_TEXT || offset > text.len() {
+        return None;
+    }
+    let analysis = Analysis::new(text)?;
+    if let Some(info) = default_export(&analysis, offset) {
+        return Some(info);
+    }
+    if let Some(path) = path
+        && let Some(info) = imported(&analysis, offset, path)
+    {
+        return Some(info);
+    }
+    hover(text, offset)
+}
+
+/// `export default …`, the pointer on `export` or `default`: what the module exports.
+fn default_export(analysis: &Analysis, offset: usize) -> Option<Hover> {
+    let root = analysis.root();
+    let node = [offset, offset.saturating_sub(1)]
+        .into_iter()
+        .filter_map(|at| root.descendant_for_byte_range(at, at))
+        .find(|n| matches!(&analysis.text[n.byte_range()], "default" | "export"))?;
+    let statement = node.parent().filter(|p| p.kind() == "export_statement")?;
+    if !usages::is_default_export(analysis, statement) {
+        return None;
+    }
+    let range = node.byte_range();
+    if let Some(decl) = usages::export_decl(analysis, "default") {
+        let (title, body) = describe_decl(analysis, decl);
+        return Some(Hover {
+            range,
+            title: format!("export default {title}"),
+            body,
+        });
+    }
+    let value = usages::default_value(analysis)?;
+    Some(Hover {
+        range,
+        title: format!("export default {}", value_summary(analysis, value)),
+        body: String::new(),
+    })
+}
+
+/// The type of an expression, or its text when the type is unknown.
+fn value_summary(analysis: &Analysis, value: tree_sitter::Node) -> String {
+    let ty = analysis.ty_of(value, value.start_byte());
+    if ty != Ty::Unknown {
+        return analysis.show(&ty);
+    }
+    let text = collapse(&analysis.text[value.byte_range()]);
+    if text.chars().count() > 80 {
+        format!("{} …", text.chars().take(80).collect::<String>())
+    } else {
+        text
+    }
+}
+
+/// A name imported from a file of the project: its declaration in that file.
+fn imported(analysis: &Analysis, offset: usize, path: &Path) -> Option<Hover> {
+    let root = analysis.root();
+    let leaf = [offset, offset.saturating_sub(1)]
+        .into_iter()
+        .filter_map(|at| root.descendant_for_byte_range(at, at))
+        .find(|n| matches!(n.kind(), "identifier" | "type_identifier"))?;
+    let name = &analysis.text[leaf.byte_range()];
+    let decl = analysis.resolve(name, leaf.start_byte())?;
+    let (source, imported) = decl.import.as_ref().filter(|(_, i)| i != "*")?;
+    let file = navigate::resolve_module(path.parent()?, source)?;
+    let content = std::fs::read_to_string(&file)
+        .ok()
+        .filter(|c| c.len() <= MAX_TEXT)?;
+    let _dialect = use_dialect(Dialect::of(Some(&file), ""));
+    let other = Analysis::new(&content)?;
+    let range = leaf.byte_range();
+    let from = trf!("javascript.hover_from_module", module = source);
+    let with_origin = |doc: String| {
+        if doc.is_empty() {
+            from.clone()
+        } else {
+            format!("{doc}\n\n{from}")
+        }
+    };
+    if let Some(declared) = usages::export_decl(&other, imported) {
+        let (title, body) = describe_decl(&other, declared);
+        return Some(Hover {
+            range,
+            title: format!("(alias) {title}"),
+            body: with_origin(body),
+        });
+    }
+    if imported == "default"
+        && let Some(value) = usages::default_value(&other)
+    {
+        return Some(Hover {
+            range,
+            title: format!("(alias) {name}: {}", value_summary(&other, value)),
+            body: with_origin(String::new()),
+        });
+    }
+    None
 }
 
 pub fn hover(text: &str, offset: usize) -> Option<Hover> {
@@ -211,7 +318,7 @@ fn describe_decl(analysis: &Analysis, decl: &Decl) -> (String, String) {
         }
     };
     let body = match (&decl.import, doc.is_empty()) {
-        (Some((module, _)), _) => format!("depuis « {module} »"),
+        (Some((module, _)), _) => trf!("javascript.hover_from_module", module = module),
         (None, false) => doc,
         (None, true) => String::new(),
     };

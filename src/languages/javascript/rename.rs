@@ -174,7 +174,7 @@ fn declaring_file(old: &str, new_name: &str, file: &Path) -> Result<Option<FileE
     }))
 }
 
-fn project_files(root: &Path) -> Vec<PathBuf> {
+pub(crate) fn project_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {

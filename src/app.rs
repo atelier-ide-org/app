@@ -200,6 +200,7 @@ fn line_hit(query: &str) -> Option<Hit> {
     let line: usize = line.trim().parse().ok().filter(|&l| l > 0)?;
     let column: usize = column.trim().parse().ok().filter(|&c| c > 0).unwrap_or(1);
     Some(Hit {
+        mark: None,
         label: trf!("line_column", line = line, column = column),
         hint: tr!("enter_go_there").into(),
         icon: Some("search"),
@@ -412,11 +413,64 @@ enum Target {
     Text(PathBuf, usize, usize, usize),
 }
 
+/// A line of Find in Files on one row, its match highlighted, cut with `…`; a match far in a
+/// long line is brought into view by cutting the start of the line.
+fn marked(
+    ui: &egui::Ui,
+    text: &str,
+    (start, end): (usize, usize),
+    color: egui::Color32,
+    max_width: f32,
+) -> Arc<egui::Galley> {
+    let chars: Vec<char> = text.chars().collect();
+    let (start, end) = (start.min(chars.len()), end.min(chars.len()));
+    let font = FontId::proportional(13.0);
+    let width = |s: &str| {
+        ui.painter()
+            .layout_no_wrap(s.to_string(), font.clone(), color)
+            .size()
+            .x
+    };
+    // The start is cut when the match would not fit after it.
+    let mut from = 0;
+    let to_end: String = chars[..end].iter().collect();
+    if width(&to_end) > max_width * 0.8 {
+        from = start.saturating_sub(12);
+    }
+    let part = |a: usize, b: usize| chars[a..b].iter().collect::<String>();
+    let plain = egui::TextFormat::simple(font.clone(), color);
+    let mut job = egui::text::LayoutJob::default();
+    if from > 0 {
+        job.append("…", 0.0, plain.clone());
+    }
+    job.append(&part(from, start), 0.0, plain.clone());
+    job.append(
+        &part(start, end),
+        0.0,
+        egui::TextFormat {
+            background: egui::Color32::from_rgba_unmultiplied(255, 200, 40, 90),
+            ..plain.clone()
+        },
+    );
+    job.append(&part(end, chars.len()), 0.0, plain);
+    job.wrap = egui::text::TextWrapping {
+        max_width,
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    ui.painter().layout_job(job)
+}
+
 /// The search of the text typed in Search Everywhere through the files of the project, in the
 /// background: its results arrive while the popup is open.
 struct PaletteText {
     query: String,
+    /// The matches searched at most.
+    limit: usize,
     cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// The search went through the whole project, or stopped at `limit`.
+    done: Arc<std::sync::atomic::AtomicBool>,
     rx: std::sync::mpsc::Receiver<crate::search::FileHits>,
     hits: Vec<Hit>,
 }
@@ -425,6 +479,8 @@ struct PaletteText {
 const TEXT_MIN_QUERY: usize = 3;
 /// Matches of the text shown at most.
 const TEXT_MAX_HITS: usize = 40;
+/// Matches shown at most by Find in Files (Ctrl+Shift+F); the Find window shows them all.
+const FIND_MAX_HITS: usize = 500;
 
 /// What a kept search depends on: the popup mode, what is typed and the list searched.
 #[derive(Clone, PartialEq, Eq)]
@@ -450,6 +506,8 @@ enum PaletteMode {
     Bookmarks,
     /// The saved versions of the active file (Local History).
     History,
+    /// Find in Files (Ctrl+Shift+F): the text in the files of the project only.
+    Text,
 }
 
 #[derive(Clone)]
@@ -459,6 +517,8 @@ struct Hit {
     icon: Option<&'static str>,
     file: Option<PathBuf>,
     target: Target,
+    /// The characters of `label` that matched, highlighted: a match of Find in Files.
+    mark: Option<(usize, usize)>,
 }
 
 pub struct Ide {
@@ -1966,6 +2026,17 @@ impl Ide {
         self.open_palette_as(PaletteMode::Everywhere);
     }
 
+    /// Find in Files (Ctrl+Shift+F) in the popup of Search Everywhere, with the selected text.
+    fn open_find_in_files(&mut self) {
+        let selected = self
+            .selected_text()
+            .filter(|t| !t.contains('\n') && t.len() < 200);
+        self.open_palette_as(PaletteMode::Text);
+        if let Some(text) = selected {
+            self.palette_query = text;
+        }
+    }
+
     fn open_palette_as(&mut self, mode: PaletteMode) {
         self.palette_mode = mode;
         self.show_palette = true;
@@ -2140,9 +2211,14 @@ impl Ide {
         let (shift, other) = ctx.input(|i| {
             (
                 i.modifiers.shift && !i.modifiers.ctrl && !i.modifiers.alt,
-                i.events
-                    .iter()
-                    .any(|e| matches!(e, egui::Event::Key { .. } | egui::Event::Text(_))),
+                // Shift itself is a key event since egui 0.37: only the other keys count.
+                i.events.iter().any(|e| match e {
+                    egui::Event::Key { key, .. } => {
+                        !matches!(key, egui::Key::ShiftLeft | egui::Key::ShiftRight)
+                    }
+                    egui::Event::Text(_) => true,
+                    _ => false,
+                }),
             )
         });
         if other {
@@ -5249,7 +5325,8 @@ impl Ide {
                 });
                 if let Some((plugin, path, layout)) = &preview {
                     if self.builtins[*plugin].layout_switch(path) {
-                        let width = 3.0 * ui::BUTTON + 6.0;
+                        let visual = self.builtins[*plugin].visual_editing(path);
+                        let width = if visual { 4.0 } else { 3.0 } * ui::BUTTON + 6.0;
                         let pos = pos2(
                             ui.max_rect().right() - width - 22.0,
                             ui.cursor().top() + 8.0,
@@ -5282,7 +5359,15 @@ impl Ide {
                                                     "previewOnly",
                                                     tr!("preview_only"),
                                                 ),
+                                                (
+                                                    EditorLayout::Visual,
+                                                    "edit",
+                                                    tr!("visual_editor"),
+                                                ),
                                             ] {
+                                                if choice == EditorLayout::Visual && !visual {
+                                                    continue;
+                                                }
                                                 if ui::icon_toggle(
                                                     ui,
                                                     icon,
@@ -5316,6 +5401,10 @@ impl Ide {
                                 .show(ui, |ui| {
                                     self.builtins[*plugin].preview(ui, path, &mut doc.text, sync);
                                 });
+                        }
+                        EditorLayout::Visual => {
+                            self.builtins[*plugin].visual_editor(ui, path, &mut doc.text);
+                            return;
                         }
                         EditorLayout::Text => {}
                     }
@@ -6453,6 +6542,7 @@ impl Ide {
                     .to_string_lossy()
                     .replace('\\', "/");
                 Hit {
+                    mark: None,
                     label: symbol.name.clone(),
                     hint: format!("{} · {relative}:{}", symbol.kind, symbol.line + 1),
                     icon: None,
@@ -6499,6 +6589,7 @@ impl Ide {
                     .is_some_and(|n| n.to_string_lossy().to_lowercase().contains(query))
             })
             .map(|path| Hit {
+                mark: None,
                 label: path
                     .file_name()
                     .unwrap_or_default()
@@ -6608,6 +6699,7 @@ impl Ide {
                     .map(|p| p.to_string_lossy().replace('\\', "/"))
                     .unwrap_or_default();
                 Hit {
+                    mark: None,
                     label: path
                         .file_name()
                         .unwrap_or_default()
@@ -6633,6 +6725,7 @@ impl Ide {
             PaletteMode::Locations => return self.location_hits(),
             PaletteMode::Bookmarks => return self.bookmark_hits(&query),
             PaletteMode::History => return self.history_hits(),
+            PaletteMode::Text => return self.text_hits(1, FIND_MAX_HITS),
             PaletteMode::Everywhere | PaletteMode::Actions => {}
         }
         let everywhere = self.palette_mode == PaletteMode::Everywhere;
@@ -6648,6 +6741,7 @@ impl Ide {
             }
             for command in plugin.query_commands(typed) {
                 hits.push(Hit {
+                    mark: None,
                     label: command.label,
                     hint: String::new(),
                     icon: Some(plugin.icon()),
@@ -6659,6 +6753,7 @@ impl Ide {
         for (i, doc) in self.documents.iter().enumerate().filter(|_| everywhere) {
             if doc.title().to_lowercase().contains(&query) {
                 hits.push(Hit {
+                    mark: None,
                     label: doc.title(),
                     hint: tr!("open_tab").into(),
                     icon: None,
@@ -6670,6 +6765,7 @@ impl Ide {
         for (i, (label, shortcut, icon)) in ACTIONS.iter().enumerate() {
             if label.get().to_lowercase().contains(&query) {
                 hits.push(Hit {
+                    mark: None,
                     label: label.get().to_string(),
                     hint: shortcut.to_string(),
                     icon: Some(*icon),
@@ -6689,6 +6785,7 @@ impl Ide {
                         .split_once("  ")
                         .unwrap_or((&command.label, ""));
                     hits.push(Hit {
+                        mark: None,
                         label: label.to_string(),
                         hint: hint.to_string(),
                         // The icon of the plugin the command belongs to.
@@ -6704,36 +6801,50 @@ impl Ide {
             self.file_index.poll();
             self.file_index.refresh(&self.root, move || repaint());
             hits.extend(self.file_hits(&query));
-            hits.extend(self.text_hits());
+            hits.extend(self.text_hits(TEXT_MIN_QUERY, TEXT_MAX_HITS));
         }
         hits
     }
 
     /// The matches of the text typed in the files of the project, as they arrive. The search
     /// starts again when the text changes.
-    fn text_hits(&mut self) -> Vec<Hit> {
+    fn text_hits(&mut self, shortest: usize, limit: usize) -> Vec<Hit> {
         let query = self.palette_query.trim().to_string();
-        if query.chars().count() < TEXT_MIN_QUERY {
+        if query.chars().count() < shortest {
             self.stop_text_search();
             return Vec::new();
         }
-        if self.palette_text.as_ref().is_none_or(|s| s.query != query) {
+        if self
+            .palette_text
+            .as_ref()
+            .is_none_or(|s| s.query != query || s.limit != limit)
+        {
             self.stop_text_search();
             let Ok(re) = crate::search::build(&query, crate::search::Options::default()) else {
                 return Vec::new();
             };
             let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let (tx, rx) = std::sync::mpsc::channel();
-            let (root, stop, repaint) = (self.root.clone(), cancel.clone(), self.repaint.clone());
+            let (root, stop, finished, repaint) = (
+                self.root.clone(),
+                cancel.clone(),
+                done.clone(),
+                self.repaint.clone(),
+            );
             std::thread::spawn(move || {
-                crate::search::search_project(&root, &re, "", &stop, TEXT_MAX_HITS, |hits| {
+                crate::search::search_project(&root, &re, "", &stop, limit, |hits| {
                     let _ = tx.send(hits);
                     repaint();
                 });
+                finished.store(true, std::sync::atomic::Ordering::Relaxed);
+                repaint();
             });
             self.palette_text = Some(PaletteText {
                 query,
+                limit,
                 cancel,
+                done,
                 rx,
                 hits: Vec::new(),
             });
@@ -6751,6 +6862,7 @@ impl Ide {
                 .replace('\\', "/");
             for hit in found.hits {
                 search.hits.push(Hit {
+                    mark: Some((hit.shown_column, hit.shown_column + hit.length)),
                     label: hit.text.clone(),
                     hint: format!("{relative}:{}", hit.line + 1),
                     icon: None,
@@ -6777,6 +6889,14 @@ impl Ide {
         }
         let t = self.theme(ctx);
         let hits = self.palette_hits();
+        let text_mode = self.palette_mode == PaletteMode::Text;
+        // Find in Files: Ctrl+Enter shows all the matches in the Find window, to replace them.
+        let all = text_mode
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter));
+        let searched = self
+            .palette_text
+            .as_ref()
+            .map(|s| s.done.load(std::sync::atomic::Ordering::Relaxed));
         let (down, up, enter, escape) = ctx.input_mut(|i| {
             (
                 i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
@@ -6832,6 +6952,14 @@ impl Ide {
                                         PaletteMode::Line => {
                                             (tr!("go_line"), tr!("line_line_column"))
                                         }
+                                        PaletteMode::Text => (
+                                            tr!("find_in_files"),
+                                            match searched {
+                                                None => tr!("find_in_files_hint"),
+                                                Some(false) => tr!("find_in_files_searching"),
+                                                Some(true) => "",
+                                            },
+                                        ),
                                         PaletteMode::Symbols if self.symbol_index.busy() => {
                                             (tr!("go_symbol"), tr!("reading_symbols"))
                                         }
@@ -6840,9 +6968,30 @@ impl Ide {
                                         }
                                     };
                                     ui.label(RichText::new(title).font(ui::semibold(13.0)));
+                                    let subtitle = match (text_mode, searched) {
+                                        (true, Some(true)) => trf!(
+                                            "find_in_files_count",
+                                            count = hits.len(),
+                                            more =
+                                                if hits.len() >= FIND_MAX_HITS { "+" } else { "" }
+                                        ),
+                                        _ => subtitle.to_string(),
+                                    };
                                     ui.label(
                                         RichText::new(subtitle).small().color(t.text_secondary),
                                     );
+                                    if text_mode {
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                ui.label(
+                                                    RichText::new(tr!("find_in_files_all"))
+                                                        .small()
+                                                        .color(t.text_secondary),
+                                                );
+                                            },
+                                        );
+                                    }
                                 });
                                 ui.add_space(6.0);
                                 let field = ui::search_field(
@@ -6850,6 +6999,8 @@ impl Ide {
                                     &mut self.palette_query,
                                     if self.palette_mode == PaletteMode::Line {
                                         tr!("line_number")
+                                    } else if text_mode {
+                                        tr!("find_in_files_field")
                                     } else {
                                         tr!("type_search")
                                     },
@@ -6888,10 +7039,14 @@ impl Ide {
                                     if hits.is_empty() {
                                         ui.add_space(12.0);
                                         ui.vertical_centered(|ui| {
-                                            ui.label(
-                                                RichText::new(tr!("no_results"))
-                                                    .color(t.text_secondary),
-                                            );
+                                            let empty = if text_mode && searched.is_none() {
+                                                tr!("find_in_files_empty")
+                                            } else if text_mode && searched == Some(false) {
+                                                tr!("find_in_files_searching")
+                                            } else {
+                                                tr!("no_results")
+                                            };
+                                            ui.label(RichText::new(empty).color(t.text_secondary));
                                         });
                                         ui.add_space(12.0);
                                     }
@@ -6930,13 +7085,22 @@ impl Ide {
                                         } else {
                                             hint.size().x + 16.0
                                         };
-                                        let label = ui::elided(
-                                            ui,
-                                            &hit.label,
-                                            FontId::proportional(13.0),
-                                            t.text,
-                                            (room - hint_w).max(0.0),
-                                        );
+                                        let label = match hit.mark {
+                                            Some(mark) => marked(
+                                                ui,
+                                                &hit.label,
+                                                mark,
+                                                t.text,
+                                                (room - hint_w).max(0.0),
+                                            ),
+                                            None => ui::elided(
+                                                ui,
+                                                &hit.label,
+                                                FontId::proportional(13.0),
+                                                t.text,
+                                                (room - hint_w).max(0.0),
+                                            ),
+                                        };
                                         let painter = ui.painter().with_clip_rect(rect);
                                         painter.galley(
                                             pos2(x, rect.center().y - label.size().y / 2.0),
@@ -6971,6 +7135,14 @@ impl Ide {
                 .is_some_and(|p| !area.response.rect.contains(p));
         if escape || clicked_outside {
             self.show_palette = false;
+        }
+        if all {
+            let query = self.palette_query.trim().to_string();
+            self.show_palette = false;
+            if !query.is_empty() {
+                crate::features::search::show_all(query);
+            }
+            self.open_tool(&crate::features::search::TOOL_WINDOWS[0]);
         }
         if chosen.is_some() || !self.show_palette {
             self.stop_text_search();
@@ -7624,6 +7796,9 @@ impl Host for Ide {
     fn search_everywhere(&mut self) {
         self.open_palette();
     }
+    fn find_in_files(&mut self) {
+        self.open_find_in_files();
+    }
     fn root(&self) -> &Path {
         &self.root
     }
@@ -7641,9 +7816,6 @@ impl Host for Ide {
     }
     fn open_file(&mut self, path: PathBuf) {
         Ide::open_file(self, path);
-    }
-    fn selected_text(&self) -> Option<String> {
-        Ide::selected_text(self)
     }
     fn run_configuration(&mut self, name: String, command: String) {
         self.run_temporary(&name, &command);
@@ -7794,7 +7966,7 @@ impl Host for Ide {
 
 impl Ide {
     /// Debug builds only: `ATELIER_SHOT=out.png` saves a screenshot of the window and quits.
-    /// `ATELIER_SHOT_CLICK=x,y` clicks there, `ATELIER_SHOT_PAGE=3` opens that page of the settings first, `ATELIER_SHOT_OPEN=file` a file, `ATELIER_SHOT_CURSOR=n` puts the caret at byte n and runs `ATELIER_SHOT_ACTION` (complete by default).
+    /// `ATELIER_SHOT_CLICK=x,y` clicks there, `ATELIER_SHOT_PAGE=3` opens that page of the settings first, `ATELIER_SHOT_OPEN=file` a file, `ATELIER_SHOT_CURSOR=n` puts the caret at byte n and runs `ATELIER_SHOT_ACTION` (complete by default), `ATELIER_SHOT_COMMAND=plugin:command` runs a command of a plugin.
     #[cfg(debug_assertions)]
     fn debug_screenshot(&mut self, ctx: &egui::Context) {
         let Ok(path) = std::env::var("ATELIER_SHOT") else {
@@ -7815,6 +7987,12 @@ impl Ide {
             self.open_file(PathBuf::from(file));
         }
         if pass == 6 {
+            // A command of a plugin: `markdown:markdown.visual`.
+            if let Ok(command) = std::env::var("ATELIER_SHOT_COMMAND")
+                && let Some((plugin, id)) = command.split_once(':')
+            {
+                self.run_builtin_command(plugin, id);
+            }
             if std::env::var_os("ATELIER_SHOT_SEARCH").is_some() {
                 self.open_tool(&crate::features::search::TOOL_WINDOWS[0]);
             }
@@ -7835,6 +8013,10 @@ impl Ide {
             // Search Everywhere, with this typed in it.
             if let Ok(query) = std::env::var("ATELIER_SHOT_PALETTE") {
                 self.open_palette();
+                self.palette_query = query;
+            }
+            if let Ok(query) = std::env::var("ATELIER_SHOT_FIND_IN_FILES") {
+                self.open_find_in_files();
                 self.palette_query = query;
             }
             if let Ok(query) = std::env::var("ATELIER_SHOT_SYMBOLS") {
@@ -7882,7 +8064,8 @@ impl Ide {
                 doc.view.debug_action(&action);
             }
         }
-        let late = std::env::var_os("ATELIER_SHOT_DRAG").is_some();
+        let late = std::env::var_os("ATELIER_SHOT_DRAG").is_some()
+            || std::env::var_os("ATELIER_SHOT_SHIFT").is_some();
         if pass
             == if slow {
                 300
@@ -7917,6 +8100,29 @@ impl eframe::App for Ide {
     /// Debug builds only: `ATELIER_SHOT_CLICK=x,y` clicks there (in points) on the 10th frame.
     #[cfg(debug_assertions)]
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        // `ATELIER_SHOT_SHIFT=1` presses Shift twice: Search Everywhere.
+        if std::env::var_os("ATELIER_SHOT_SHIFT").is_some() {
+            raw_input.focused = true;
+            let pass = ctx.cumulative_pass_nr();
+            let shift = match pass {
+                12 | 15 => Some(egui::Modifiers::SHIFT),
+                14 | 17 => Some(egui::Modifiers::NONE),
+                _ => None,
+            };
+            if let Some(modifiers) = shift {
+                // As egui-winit: the modifiers, and the key of Shift itself.
+                raw_input
+                    .events
+                    .push(egui::Event::ModifiersChanged(modifiers));
+                raw_input.events.push(egui::Event::Key {
+                    key: egui::Key::ShiftLeft,
+                    physical_key: Some(egui::Key::ShiftLeft),
+                    pressed: modifiers.shift,
+                    repeat: false,
+                    modifiers,
+                });
+            }
+        }
         // `ATELIER_SHOT_DRAG=x1,y1,x2,y2` drags from the first point to the second.
         if let Some(v) = std::env::var("ATELIER_SHOT_DRAG").ok().and_then(|v| {
             let n: Vec<f32> = v.split(',').filter_map(|p| p.parse().ok()).collect();

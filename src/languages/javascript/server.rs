@@ -98,14 +98,19 @@ pub fn launch(project: &Path) -> Option<Launch> {
         "includeInlayVariableTypeHintsWhenTypeMatchesName": false,
         "includeInlayFunctionLikeReturnTypeHints": true,
     });
-    let options = match find_tsserver(project) {
-        Some(path) => json!({
-            "tsserver": {"path": path.to_string_lossy()},
-            "hostInfo": "atelier",
-            "preferences": preferences,
-        }),
-        None => json!({"hostInfo": "atelier", "preferences": preferences}),
-    };
+    // A single tsserver, without the "syntax server" that answers while the project loads: its
+    // answers only know the open file (no types of imports, no usages in other files, `any`
+    // everywhere), and the IDE would show them as the truth. The requests wait for the project
+    // instead, and the IDE says it is loading.
+    let mut tsserver = json!({"useSyntaxServer": "never"});
+    if let Some(path) = find_tsserver(project) {
+        tsserver["path"] = json!(crate::project::simplify(&path).to_string_lossy());
+    }
+    let options = json!({
+        "tsserver": tsserver,
+        "hostInfo": "atelier",
+        "preferences": preferences,
+    });
     Some(Launch {
         program,
         args: vec!["--stdio".into()],
