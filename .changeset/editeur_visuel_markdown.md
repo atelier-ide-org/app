@@ -1,5 +1,5 @@
 ---
-default: minor
+default: major
 ---
 
 # Un éditeur visuel Markdown, JS/TS plus complet, et Rechercher dans les fichiers comme Maj Maj
