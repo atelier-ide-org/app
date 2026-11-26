@@ -67,7 +67,7 @@ version = "0.37.0"
 default-features = false
 
 [dependencies.fancy-regex]
-version = "0.16"
+version = "0.20"
 optional = true
 
 [dependencies.pulldown-cmark]
