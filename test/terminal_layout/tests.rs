@@ -59,11 +59,13 @@ fn dragging_a_divider_changes_the_ratio_within_limits() {
     let mut root = tree();
     let area = Rect::from_min_size(pos2(0.0, 0.0), vec2(106.0, 100.0));
     let (_, dividers) = root.layout(area, 6.0);
-    let ratio = dividers[0].ratio_at(78.0, 6.0);
+    // Grabbed anywhere on it, the divider moves by as much as the pointer: 25 points of the 100
+    // shared from the middle.
+    let ratio = dividers[0].ratio_moved(25.0, 6.0);
     assert!((ratio - 0.75).abs() < 1e-6);
     *root.ratio_mut(&dividers[0].path).unwrap() = ratio;
     let (rects, _) = root.layout(area, 6.0);
     assert_eq!(rects[0].width(), 75.0);
-    assert_eq!(dividers[0].ratio_at(-50.0, 6.0), MIN_RATIO);
-    assert_eq!(dividers[0].ratio_at(500.0, 6.0), 1.0 - MIN_RATIO);
+    assert_eq!(dividers[0].ratio_moved(-500.0, 6.0), MIN_RATIO);
+    assert_eq!(dividers[0].ratio_moved(500.0, 6.0), 1.0 - MIN_RATIO);
 }

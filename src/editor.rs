@@ -58,6 +58,30 @@ struct Change {
     group: u64,
 }
 
+/// Undo steps kept at most for a document, and the bytes of text they may hold: past either,
+/// the oldest steps are forgotten. Every reformat or paste keeps the text it replaced, so a
+/// document edited for a day grew its history without end.
+const MAX_UNDO_STEPS: usize = 10_000;
+const MAX_UNDO_BYTES: usize = 32 * 1024 * 1024;
+
+/// Forgets the oldest steps of `undo` past the limits, the changes of one keystroke together.
+fn trim_undo(undo: &mut Vec<Change>) {
+    let mut bytes: usize = undo
+        .iter()
+        .map(|c| c.removed.len() + c.inserted.len())
+        .sum();
+    let mut drop = 0;
+    while drop + 1 < undo.len() && (undo.len() - drop > MAX_UNDO_STEPS || bytes > MAX_UNDO_BYTES) {
+        bytes -= undo[drop].removed.len() + undo[drop].inserted.len();
+        drop += 1;
+    }
+    let group = drop.checked_sub(1).map_or(0, |last| undo[last].group);
+    while group != 0 && drop + 1 < undo.len() && undo[drop].group == group {
+        drop += 1;
+    }
+    undo.drain(..drop);
+}
+
 /// Bytes of a line drawn at most: past them, the line ends with a mark.
 pub const MAX_DRAWN_LINE: usize = 10_000;
 
@@ -84,6 +108,14 @@ pub struct EditorState {
     /// Last caret or text change, for the blinking caret.
     activity: Instant,
     pub scroll_fraction: f32,
+    /// The line at the top of the view, with the part of it scrolled past: two editors of a
+    /// diff scroll together by it.
+    pub top_line: f32,
+    /// The line to bring to the top of the view at the next frame ([`Self::scroll_top_to`]).
+    scroll_top: Option<f32>,
+    /// As of the last frame: the top of the text on the screen (scrolled), the height of a
+    /// row, and the part of the screen the text is shown in ([`Self::line_y`]).
+    geometry: Option<(f32, f32, Rect)>,
     /// Grows with every change of the text, for the language service.
     rev: u64,
     assist: AssistState,
@@ -155,6 +187,9 @@ impl Default for EditorState {
             scroll_to_cursor: false,
             activity: Instant::now(),
             scroll_fraction: 0.0,
+            top_line: 0.0,
+            scroll_top: None,
+            geometry: None,
             rev: 0,
             assist: AssistState::default(),
             intel: Default::default(),
@@ -481,6 +516,11 @@ pub struct Options<'a> {
     pub bookmarks: &'a [(usize, Option<u8>)],
     /// The misspelled words of the comments and strings are underlined.
     pub spellcheck: bool,
+    /// A background for whole lines (0-based), sorted by line: the changes of a diff.
+    pub line_colors: &'a [(usize, Color32)],
+    /// The numbers of the lines in the gutter: off where the annotations number them (the two
+    /// files of a unified diff).
+    pub line_numbers: bool,
 }
 
 #[derive(Default)]
@@ -698,7 +738,7 @@ impl EditorState {
         self.redo.clear();
     }
 
-    fn sync(&mut self, text: &str) {
+    pub fn sync(&mut self, text: &str) {
         let hash = text_hash(text);
         if self.indexed_len == text.len() && self.indexed_hash == hash {
             return;
@@ -733,6 +773,28 @@ impl EditorState {
             pos -= 1;
         }
         pos
+    }
+
+    /// Where `line` (0-based) begins on the screen, as of the last frame; the end of the text
+    /// for a line past it. None before the editor was first shown.
+    pub fn line_y(&self, line: usize) -> Option<f32> {
+        let (top, row, _) = self.geometry?;
+        let shown = if line >= self.lines.len() {
+            self.row_count()
+        } else {
+            self.row_of(line)
+        };
+        Some(top + shown as f32 * row)
+    }
+
+    /// The part of the screen the text was shown in, the last frame.
+    pub fn text_rect(&self) -> Option<Rect> {
+        self.geometry.map(|(_, _, rect)| rect)
+    }
+
+    /// Brings `line` (0-based, with a fraction of it) to the top of the view at the next frame.
+    pub fn scroll_top_to(&mut self, line: f32) {
+        self.scroll_top = Some(line);
     }
 
     #[cfg(test)]
@@ -1062,7 +1124,10 @@ impl EditorState {
                 last.inserted.push_str(insert);
                 last.after = change.after;
             }
-            _ => self.undo.push(change),
+            _ => {
+                self.undo.push(change);
+                trim_undo(&mut self.undo);
+            }
         }
         self.last_typing = typing.then(Instant::now);
         self.redo.clear();
@@ -2416,7 +2481,11 @@ impl EditorState {
             .map(|a| a.chars().count())
             .max()
             .unwrap_or(0);
-        let digits = self.lines.len().to_string().len().max(3);
+        let digits = if opt.line_numbers {
+            self.lines.len().to_string().len().max(3)
+        } else {
+            0
+        };
         let annotation_x = 10.0;
         let numbers_x = annotation_x
             + if annotation_width > 0 {
@@ -2439,612 +2508,610 @@ impl EditorState {
         }
         let viewport_height = ui.available_height();
         let page = ((viewport_height / row) as isize - 2).max(1);
-        let area = egui::ScrollArea::both()
+        let mut area = egui::ScrollArea::both()
             .id_salt(id)
-            .auto_shrink([false, false])
-            .show_viewport(ui, |ui, viewport| {
-                let width =
-                    (text_x + (self.longest as f32 + 8.0) * char_width).max(ui.available_width());
-                // The scroll stops when the last line reaches the bottom, with a little room
-                // under it; a file shorter than the window does not scroll at all.
-                let rows = self.row_count() as f32 * row;
-                let height = if rows > viewport_height {
-                    rows + row
-                } else {
-                    rows
-                };
-                let (rect, response) =
-                    ui.allocate_exact_size(vec2(width, height), Sense::click_and_drag());
-                let origin = rect.min;
-                // The scroll area widens its clip by `clip_rect_margin` on each side: the
-                // selection and the caret row would spill over the frame of the editor.
-                let visible = Rect::from_min_size(origin + viewport.min.to_vec2(), viewport.size());
-                ui.set_clip_rect(ui.clip_rect().intersect(visible));
-                if response.clicked()
-                    || response.drag_started()
-                    || (cfg!(debug_assertions) && std::env::var_os("ATELIER_SHOT_FOCUS").is_some())
-                {
-                    response.request_focus();
+            .auto_shrink([false, false]);
+        if let Some(line) = self.scroll_top.take() {
+            let whole = (line.max(0.0) as usize).min(self.lines.len().saturating_sub(1));
+            let offset = (self.row_of(whole) as f32 + line.fract()) * row;
+            area = area.vertical_scroll_offset(offset);
+        }
+        let area = area.show_viewport(ui, |ui, viewport| {
+            let width =
+                (text_x + (self.longest as f32 + 8.0) * char_width).max(ui.available_width());
+            // The scroll stops when the last line reaches the bottom, with a little room
+            // under it; a file shorter than the window does not scroll at all.
+            let rows = self.row_count() as f32 * row;
+            let height = if rows > viewport_height {
+                rows + row
+            } else {
+                rows
+            };
+            let (rect, response) =
+                ui.allocate_exact_size(vec2(width, height), Sense::click_and_drag());
+            let origin = rect.min;
+            // The scroll area widens its clip by `clip_rect_margin` on each side: the
+            // selection and the caret row would spill over the frame of the editor.
+            let visible = Rect::from_min_size(origin + viewport.min.to_vec2(), viewport.size());
+            ui.set_clip_rect(ui.clip_rect().intersect(visible));
+            self.geometry = Some((origin.y, row, visible));
+            if response.clicked()
+                || response.drag_started()
+                || (cfg!(debug_assertions) && std::env::var_os("ATELIER_SHOT_FOCUS").is_some())
+            {
+                response.request_focus();
+            }
+            // Right click: the caret goes there, unless it is in the selection, which the
+            // menu then works on.
+            if response.secondary_clicked()
+                && let Some(pos) = response.interact_pointer_pos()
+            {
+                response.request_focus();
+                let at = self.hit(ui, text, origin, row, text_x, pos, opt);
+                let selection = self.selection();
+                if selection.is_empty() || !selection.contains(&at) {
+                    self.clear_extras();
+                    self.anchor = at;
+                    self.cursor = at;
                 }
-                // Right click: the caret goes there, unless it is in the selection, which the
-                // menu then works on.
-                if response.secondary_clicked()
-                    && let Some(pos) = response.interact_pointer_pos()
-                {
-                    response.request_focus();
-                    let at = self.hit(ui, text, origin, row, text_x, pos, opt);
-                    let selection = self.selection();
-                    if selection.is_empty() || !selection.contains(&at) {
-                        self.clear_extras();
-                        self.anchor = at;
-                        self.cursor = at;
-                    }
-                }
-                response.context_menu(|ui| self.text_menu(ui, opt));
-                output.reformat = std::mem::take(&mut self.menu_reformat);
-                if let Some(command) = self.menu_command.take() {
-                    output.command = Some(command);
-                }
-                // A click in the menu took the keyboard away: the entry chosen needs it back.
-                if !self.menu_events.is_empty() {
-                    response.request_focus();
-                }
-                let focused = response.has_focus();
-                // The lines kept on top while the block they open is in view.
-                let top_row = (viewport.min.y / row).ceil().max(0.0) as usize;
-                let sticky = if opt.sticky_lines {
-                    self.sticky_lines(text, top_row)
-                } else {
-                    Vec::new()
-                };
-                let sticky_rect = (!sticky.is_empty()).then(|| {
-                    Rect::from_min_size(
-                        // From the very top of what is visible: no sliver of scrolled text above.
-                        pos2(origin.x + viewport.min.x, ui.clip_rect().top()),
-                        vec2(viewport.width(), sticky.len() as f32 * row),
+            }
+            response.context_menu(|ui| self.text_menu(ui, opt));
+            output.reformat = std::mem::take(&mut self.menu_reformat);
+            if let Some(command) = self.menu_command.take() {
+                output.command = Some(command);
+            }
+            // A click in the menu took the keyboard away: the entry chosen needs it back.
+            if !self.menu_events.is_empty() {
+                response.request_focus();
+            }
+            let focused = response.has_focus();
+            // The lines kept on top while the block they open is in view.
+            let top_row = (viewport.min.y / row).ceil().max(0.0) as usize;
+            let sticky = if opt.sticky_lines {
+                self.sticky_lines(text, top_row)
+            } else {
+                Vec::new()
+            };
+            let sticky_rect = (!sticky.is_empty()).then(|| {
+                Rect::from_min_size(
+                    // From the very top of what is visible: no sliver of scrolled text above.
+                    pos2(origin.x + viewport.min.x, ui.clip_rect().top()),
+                    vec2(viewport.width(), sticky.len() as f32 * row),
+                )
+            });
+            // Leaving the editor closes the popup (not before it ever had the focus).
+            self.assist.focus_changed(focused);
+            if focused {
+                ui.memory_mut(|m| {
+                    m.set_focus_lock_filter(
+                        response.id,
+                        egui::EventFilter {
+                            tab: true,
+                            horizontal_arrows: true,
+                            vertical_arrows: true,
+                            ..Default::default()
+                        },
                     )
                 });
-                // Leaving the editor closes the popup (not before it ever had the focus).
-                self.assist.focus_changed(focused);
-                if focused {
-                    ui.memory_mut(|m| {
-                        m.set_focus_lock_filter(
-                            response.id,
-                            egui::EventFilter {
-                                tab: true,
-                                horizontal_arrows: true,
-                                vertical_arrows: true,
-                                ..Default::default()
-                            },
-                        )
-                    });
-                    output.changed |=
-                        self.handle_events(ui, text, opt.language, page, opt.read_only);
+                output.changed |= self.handle_events(ui, text, opt.language, page, opt.read_only);
+            }
+            // A press on a color swatch opens the picker, and nothing else.
+            if !ui.input(|i| i.pointer.primary_down()) {
+                self.swatch_press = false;
+            }
+            if !opt.read_only
+                && ui.input(|i| i.pointer.primary_pressed())
+                && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
+                && let Some((rect, index)) = self
+                    .swatch_rects
+                    .iter()
+                    .find(|(r, _)| r.expand(1.0).contains(pos))
+                    .copied()
+            {
+                self.swatch_press = true;
+                self.open_color(ui, index, rect);
+            }
+            // Mouse: click places the caret, drag selects, double and triple click select
+            // the word and the line. The gutter selects whole lines.
+            let pointer = ui.input(|i| i.pointer.interact_pos());
+            // A click on the completion popup is for the popup.
+            let mut popup_click = false;
+            if let Some(pos) = pointer
+                && ui.input(|i| i.pointer.primary_pressed())
+                && let Some(taken) = self.assist_click(text, pos)
+            {
+                popup_click = true;
+                output.changed |= taken;
+            }
+            let over_sticky = pointer.is_some_and(|p| sticky_rect.is_some_and(|r| r.contains(p)));
+            let over_popup = over_sticky
+                || pointer.is_some_and(|p| self.popup_rect().is_some_and(|r| r.contains(p)));
+            // A click on a kept line goes to it.
+            if let (Some(pos), Some(area)) = (pointer, sticky_rect)
+                && over_sticky
+                && ui.input(|i| i.pointer.primary_pressed())
+            {
+                let which = ((pos.y - area.top()) / row).floor().max(0.0) as usize;
+                if let Some(&line) = sticky.get(which) {
+                    let at = self.lines[line];
+                    self.select(at, at);
                 }
-                // A press on a color swatch opens the picker, and nothing else.
-                if !ui.input(|i| i.pointer.primary_down()) {
-                    self.swatch_press = false;
+            }
+            // Ctrl + click goes to the declaration instead of placing the caret.
+            let ctrl = ui.input(|i| i.modifiers.command);
+            if let Some(pos) = pointer
+                && ctrl
+                && !popup_click
+                && !over_popup
+                && response.hovered()
+                && ui.input(|i| i.pointer.primary_pressed())
+                && pos.x - origin.x - viewport.min.x >= gutter
+            {
+                self.assist.ctrl_press = true;
+                let at = self.hit(ui, text, origin, row, text_x, pos, opt);
+                // An address opens in the browser, the one of a file (`file://…`) here.
+                if let Some(url) = self.url_at(text, at) {
+                    let url = &text[url];
+                    match crate::languages::lsp::uri_to_path(url).filter(|p| p.is_file()) {
+                        Some(path) => {
+                            self.assist.navigate = Some(crate::languages::Location {
+                                path: Some(path),
+                                line: 0,
+                                column: 0,
+                                end_line: 0,
+                                end_column: 0,
+                                preview: String::new(),
+                            });
+                        }
+                        None => ui.ctx().open_url(egui::OpenUrl::new_tab(url)),
+                    }
+                } else {
+                    self.assist_goto_now(ui, text, opt, at);
                 }
-                if !opt.read_only
-                    && ui.input(|i| i.pointer.primary_pressed())
-                    && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
-                    && let Some((rect, index)) = self
+            }
+            if !ui.input(|i| i.pointer.primary_down()) {
+                self.assist.ctrl_press = false;
+            }
+            // The fold markers of the gutter and the placeholder of a collapsed region.
+            if !ui.input(|i| i.pointer.primary_down()) {
+                self.fold_press = false;
+                self.own_press = false;
+                self.column_anchor = None;
+            }
+            if response.hovered() && ui.input(|i| i.pointer.primary_pressed()) {
+                self.own_press = true;
+            }
+            if let Some(pos) = pointer
+                && !popup_click
+                && !over_popup
+                && response.hovered()
+                && ui.input(|i| i.pointer.primary_pressed())
+            {
+                let row_index = ((pos.y - origin.y) / row).floor();
+                if row_index >= 0.0 && (row_index as usize) < self.row_count() {
+                    let line = self.line_at(row_index as usize);
+                    let local_x = pos.x - origin.x - viewport.min.x;
+                    // The bulb of the caret line: its fixes, and no selection of the line.
+                    if opt.assist.is_some()
+                        && self.bulb().is_some_and(|(l, _)| l == line)
+                        && (marks_x..marks_x + 10.0).contains(&local_x)
+                    {
+                        self.open_line_fixes();
+                        self.fold_press = true;
+                        response.request_focus();
+                    }
+                    if let Some((open, head_end)) =
+                        self.region_at(line).map(|r| (r.open, r.head_end))
+                    {
+                        let on_marker = local_x >= marks_x + 10.0 && local_x < gutter;
+                        let on_placeholder = local_x >= gutter && self.folded.contains(&open) && {
+                            let galley = self.galley(ui, text, line, opt);
+                            let head =
+                                column_of(self.line(text, line), head_end - self.lines[line]);
+                            let x = pos.x - origin.x - text_x;
+                            x >= galley
+                                .pos_from_cursor(CCursor::new(self.visual_column(text, line, head)))
+                                .min
+                                .x
+                                - 1.0
+                                && x <= galley.size().x + 2.0
+                        };
+                        if on_marker || on_placeholder {
+                            self.toggle_fold(open);
+                            self.fold_press = true;
+                        }
+                    }
+                }
+            }
+            if let Some(pos) = pointer
+                && !popup_click
+                && !over_popup
+                && !self.fold_press
+                && !self.swatch_press
+                && !self.assist.ctrl_press
+                && self.own_press
+                && response.is_pointer_button_down_on()
+                && ui.input(|i| i.pointer.primary_down())
+            {
+                let in_gutter = pos.x - origin.x - viewport.min.x < gutter;
+                let at = self.hit(ui, text, origin, row, text_x, pos, opt);
+                // The anchor is set where the button went down: a drag is only known once
+                // the pointer has moved, a few pixels further.
+                let pressed = ui.input(|i| i.pointer.primary_pressed());
+                let extend = ui.input(|i| i.modifiers.shift) || !pressed;
+                let (alt, shift) = ui.input(|i| (i.modifiers.alt, i.modifiers.shift));
+                let columns = !in_gutter && ((alt && !shift) || self.column_mode);
+                if in_gutter {
+                    self.clear_extras();
+                    let line = self.line_of(at);
+                    let end = self.lines.get(line + 1).copied().unwrap_or(text.len());
+                    if !extend {
+                        self.anchor = self.lines[line];
+                    }
+                    self.cursor = end;
+                } else if pressed && alt && shift {
+                    // Alt+Shift+click: another caret.
+                    self.toggle_caret(at);
+                } else if columns {
+                    // Alt+drag: a block of columns, a caret on each of its lines.
+                    let line = self.line_at(((pos.y - origin.y) / row).floor().max(0.0) as usize);
+                    let column =
+                        ((pos.x - origin.x - text_x) / char_width).round().max(0.0) as usize;
+                    let from = *self.column_anchor.get_or_insert((line, column));
+                    self.select_columns(text, from, (line, column));
+                } else if pressed {
+                    self.clear_extras();
+                    self.move_to(at, shift);
+                } else if !(alt && shift) {
+                    self.cursor = at;
+                }
+                self.preferred_column = None;
+                self.activity = Instant::now();
+            }
+            if response.triple_clicked() {
+                let line = self.line_of(self.cursor);
+                self.anchor = self.lines[line];
+                self.cursor = self.lines.get(line + 1).copied().unwrap_or(text.len());
+            } else if response.double_clicked() {
+                let word = self.word_at(text, self.cursor);
+                self.anchor = word.start;
+                self.cursor = word.end;
+            }
+            // Gutter menu (Git actions…) on a right click in the gutter.
+            let gutter_rect = Rect::from_min_size(
+                pos2(origin.x + viewport.min.x, origin.y),
+                vec2(gutter, height),
+            );
+            let gutter_response = ui.interact(gutter_rect, id.with("gutter"), Sense::click());
+            // A click in the gutter (line numbers, fold markers) gives the editor the keyboard too.
+            if gutter_response.clicked() || gutter_response.drag_started() || self.fold_press {
+                response.request_focus();
+            }
+            // What is under the pointer, for the tooltip.
+            let hover_pos = ui.input(|i| i.pointer.hover_pos());
+            let hover_offset = hover_pos
+                .filter(|p| {
+                    response.hovered()
+                        && !over_popup
+                        && !gutter_rect.contains(*p)
+                        && !response.dragged()
+                })
+                .and_then(|p| {
+                    let index = ((p.y - origin.y) / row).floor();
+                    if index < 0.0 || index as usize >= self.row_count() {
+                        return None;
+                    }
+                    let index = self.line_at(index as usize);
+                    let galley = self.galley(ui, text, index, opt);
+                    let x = p.x - origin.x - text_x;
+                    (x >= 0.0 && x <= galley.size().x + 2.0)
+                        .then(|| self.hit(ui, text, origin, row, text_x, p, opt))
+                });
+            self.assist_list_mouse(ui, hover_pos);
+            self.url_hover = hover_offset
+                .filter(|_| ctrl)
+                .and_then(|o| self.url_at(text, o));
+            // Over an address, Ctrl+click opens it: no declaration to look for.
+            self.assist_hover(
+                ui,
+                text,
+                opt,
+                hover_offset,
+                ctrl && self.url_hover.is_none(),
+            );
+            // I-beam over the text, the regular arrow over the gutter, a hand over a color
+            // swatch, which opens the picker, and over an address with Ctrl held.
+            if (response.hovered() || response.dragged())
+                && let Some(pos) = ui.input(|i| i.pointer.latest_pos())
+                && !gutter_rect.contains(pos)
+            {
+                let clickable = (!opt.read_only
+                    && !response.dragged()
+                    && self
                         .swatch_rects
                         .iter()
-                        .find(|(r, _)| r.expand(1.0).contains(pos))
-                        .copied()
-                {
-                    self.swatch_press = true;
-                    self.open_color(ui, index, rect);
-                }
-                // Mouse: click places the caret, drag selects, double and triple click select
-                // the word and the line. The gutter selects whole lines.
-                let pointer = ui.input(|i| i.pointer.interact_pos());
-                // A click on the completion popup is for the popup.
-                let mut popup_click = false;
-                if let Some(pos) = pointer
-                    && ui.input(|i| i.pointer.primary_pressed())
-                    && let Some(taken) = self.assist_click(text, pos)
-                {
-                    popup_click = true;
-                    output.changed |= taken;
-                }
-                let over_sticky =
-                    pointer.is_some_and(|p| sticky_rect.is_some_and(|r| r.contains(p)));
-                let over_popup = over_sticky
-                    || pointer.is_some_and(|p| self.popup_rect().is_some_and(|r| r.contains(p)));
-                // A click on a kept line goes to it.
-                if let (Some(pos), Some(area)) = (pointer, sticky_rect)
-                    && over_sticky
-                    && ui.input(|i| i.pointer.primary_pressed())
-                {
-                    let which = ((pos.y - area.top()) / row).floor().max(0.0) as usize;
-                    if let Some(&line) = sticky.get(which) {
-                        let at = self.lines[line];
-                        self.select(at, at);
-                    }
-                }
-                // Ctrl + click goes to the declaration instead of placing the caret.
-                let ctrl = ui.input(|i| i.modifiers.command);
-                if let Some(pos) = pointer
-                    && ctrl
-                    && !popup_click
-                    && !over_popup
-                    && response.hovered()
-                    && ui.input(|i| i.pointer.primary_pressed())
-                    && pos.x - origin.x - viewport.min.x >= gutter
-                {
-                    self.assist.ctrl_press = true;
-                    let at = self.hit(ui, text, origin, row, text_x, pos, opt);
-                    // An address opens in the browser, the one of a file (`file://…`) here.
-                    if let Some(url) = self.url_at(text, at) {
-                        let url = &text[url];
-                        match crate::languages::lsp::uri_to_path(url).filter(|p| p.is_file()) {
-                            Some(path) => {
-                                self.assist.navigate = Some(crate::languages::Location {
-                                    path: Some(path),
-                                    line: 0,
-                                    column: 0,
-                                    end_line: 0,
-                                    end_column: 0,
-                                    preview: String::new(),
-                                });
-                            }
-                            None => ui.ctx().open_url(egui::OpenUrl::new_tab(url)),
-                        }
-                    } else {
-                        self.assist_goto_now(ui, text, opt, at);
-                    }
-                }
-                if !ui.input(|i| i.pointer.primary_down()) {
-                    self.assist.ctrl_press = false;
-                }
-                // The fold markers of the gutter and the placeholder of a collapsed region.
-                if !ui.input(|i| i.pointer.primary_down()) {
-                    self.fold_press = false;
-                    self.own_press = false;
-                    self.column_anchor = None;
-                }
-                if response.hovered() && ui.input(|i| i.pointer.primary_pressed()) {
-                    self.own_press = true;
-                }
-                if let Some(pos) = pointer
-                    && !popup_click
-                    && !over_popup
-                    && response.hovered()
-                    && ui.input(|i| i.pointer.primary_pressed())
-                {
-                    let row_index = ((pos.y - origin.y) / row).floor();
-                    if row_index >= 0.0 && (row_index as usize) < self.row_count() {
-                        let line = self.line_at(row_index as usize);
-                        let local_x = pos.x - origin.x - viewport.min.x;
-                        // The bulb of the caret line: its fixes, and no selection of the line.
-                        if opt.assist.is_some()
-                            && self.bulb().is_some_and(|(l, _)| l == line)
-                            && (marks_x..marks_x + 10.0).contains(&local_x)
-                        {
-                            self.open_line_fixes();
-                            self.fold_press = true;
-                            response.request_focus();
-                        }
-                        if let Some((open, head_end)) =
-                            self.region_at(line).map(|r| (r.open, r.head_end))
-                        {
-                            let on_marker = local_x >= marks_x + 10.0 && local_x < gutter;
-                            let on_placeholder =
-                                local_x >= gutter && self.folded.contains(&open) && {
-                                    let galley = self.galley(ui, text, line, opt);
-                                    let head = column_of(
-                                        self.line(text, line),
-                                        head_end - self.lines[line],
-                                    );
-                                    let x = pos.x - origin.x - text_x;
-                                    x >= galley
-                                        .pos_from_cursor(CCursor::new(
-                                            self.visual_column(text, line, head),
-                                        ))
-                                        .min
-                                        .x
-                                        - 1.0
-                                        && x <= galley.size().x + 2.0
-                                };
-                            if on_marker || on_placeholder {
-                                self.toggle_fold(open);
-                                self.fold_press = true;
-                            }
-                        }
-                    }
-                }
-                if let Some(pos) = pointer
-                    && !popup_click
-                    && !over_popup
-                    && !self.fold_press
-                    && !self.swatch_press
-                    && !self.assist.ctrl_press
-                    && self.own_press
-                    && response.is_pointer_button_down_on()
-                    && ui.input(|i| i.pointer.primary_down())
-                {
-                    let in_gutter = pos.x - origin.x - viewport.min.x < gutter;
-                    let at = self.hit(ui, text, origin, row, text_x, pos, opt);
-                    // The anchor is set where the button went down: a drag is only known once
-                    // the pointer has moved, a few pixels further.
-                    let pressed = ui.input(|i| i.pointer.primary_pressed());
-                    let extend = ui.input(|i| i.modifiers.shift) || !pressed;
-                    let (alt, shift) = ui.input(|i| (i.modifiers.alt, i.modifiers.shift));
-                    let columns = !in_gutter && ((alt && !shift) || self.column_mode);
-                    if in_gutter {
-                        self.clear_extras();
-                        let line = self.line_of(at);
-                        let end = self.lines.get(line + 1).copied().unwrap_or(text.len());
-                        if !extend {
-                            self.anchor = self.lines[line];
-                        }
-                        self.cursor = end;
-                    } else if pressed && alt && shift {
-                        // Alt+Shift+click: another caret.
-                        self.toggle_caret(at);
-                    } else if columns {
-                        // Alt+drag: a block of columns, a caret on each of its lines.
-                        let line =
-                            self.line_at(((pos.y - origin.y) / row).floor().max(0.0) as usize);
-                        let column =
-                            ((pos.x - origin.x - text_x) / char_width).round().max(0.0) as usize;
-                        let from = *self.column_anchor.get_or_insert((line, column));
-                        self.select_columns(text, from, (line, column));
-                    } else if pressed {
-                        self.clear_extras();
-                        self.move_to(at, shift);
-                    } else if !(alt && shift) {
-                        self.cursor = at;
-                    }
-                    self.preferred_column = None;
-                    self.activity = Instant::now();
-                }
-                if response.triple_clicked() {
-                    let line = self.line_of(self.cursor);
-                    self.anchor = self.lines[line];
-                    self.cursor = self.lines.get(line + 1).copied().unwrap_or(text.len());
-                } else if response.double_clicked() {
-                    let word = self.word_at(text, self.cursor);
-                    self.anchor = word.start;
-                    self.cursor = word.end;
-                }
-                // Gutter menu (Git actions…) on a right click in the gutter.
-                let gutter_rect = Rect::from_min_size(
-                    pos2(origin.x + viewport.min.x, origin.y),
-                    vec2(gutter, height),
-                );
-                let gutter_response = ui.interact(gutter_rect, id.with("gutter"), Sense::click());
-                // A click in the gutter (line numbers, fold markers) gives the editor the keyboard too.
-                if gutter_response.clicked() || gutter_response.drag_started() || self.fold_press {
-                    response.request_focus();
-                }
-                // What is under the pointer, for the tooltip.
-                let hover_pos = ui.input(|i| i.pointer.hover_pos());
-                let hover_offset = hover_pos
-                    .filter(|p| {
-                        response.hovered()
-                            && !over_popup
-                            && !gutter_rect.contains(*p)
-                            && !response.dragged()
-                    })
-                    .and_then(|p| {
-                        let index = ((p.y - origin.y) / row).floor();
-                        if index < 0.0 || index as usize >= self.row_count() {
-                            return None;
-                        }
-                        let index = self.line_at(index as usize);
-                        let galley = self.galley(ui, text, index, opt);
-                        let x = p.x - origin.x - text_x;
-                        (x >= 0.0 && x <= galley.size().x + 2.0)
-                            .then(|| self.hit(ui, text, origin, row, text_x, p, opt))
-                    });
-                self.assist_list_mouse(ui, hover_pos);
-                self.url_hover = hover_offset
-                    .filter(|_| ctrl)
-                    .and_then(|o| self.url_at(text, o));
-                // Over an address, Ctrl+click opens it: no declaration to look for.
-                self.assist_hover(
-                    ui,
-                    text,
-                    opt,
-                    hover_offset,
-                    ctrl && self.url_hover.is_none(),
-                );
-                // I-beam over the text, the regular arrow over the gutter, a hand over a color
-                // swatch, which opens the picker, and over an address with Ctrl held.
-                if (response.hovered() || response.dragged())
-                    && let Some(pos) = ui.input(|i| i.pointer.latest_pos())
-                    && !gutter_rect.contains(pos)
-                {
-                    let clickable = (!opt.read_only
-                        && !response.dragged()
-                        && self
-                            .swatch_rects
-                            .iter()
-                            .any(|(r, _)| r.expand(1.0).contains(pos)))
-                        || self.url_hover.is_some();
-                    ui.ctx().set_cursor_icon(if clickable {
-                        egui::CursorIcon::PointingHand
-                    } else {
-                        egui::CursorIcon::Text
-                    });
-                }
-                gutter_response.context_menu(|ui| {
-                    crate::ui::menu_begin(ui);
-                    if opt.gutter_commands.is_empty() {
-                        crate::ui::menu_entry(ui, None, tr!("no_actions"), None, false, false);
-                    }
-                    for (plugin, command) in opt.gutter_commands {
-                        if crate::ui::menu_item(ui, None, &command.label, None, false).clicked() {
-                            output.command = Some((*plugin, command.id));
-                            ui.close();
-                        }
-                    }
+                        .any(|(r, _)| r.expand(1.0).contains(pos)))
+                    || self.url_hover.is_some();
+                ui.ctx().set_cursor_icon(if clickable {
+                    egui::CursorIcon::PointingHand
+                } else {
+                    egui::CursorIcon::Text
                 });
-
-                let first =
-                    ((viewport.min.y / row).floor().max(0.0) as usize).min(self.row_count());
-                // The viewport may be unbounded on the first frame of a tab: `as usize` then
-                // gives usize::MAX, and `+ 1` wrapped to 0 in release, an empty frame.
-                let last = ((viewport.max.y / row).ceil() as usize)
-                    .saturating_add(1)
-                    .min(self.row_count());
-                self.hints_frame(
-                    ui,
-                    text,
-                    opt,
-                    self.line_at(first),
-                    self.line_at(last.saturating_sub(1)),
-                );
-                // Highlighting: the visible lines first, then the rest of the file, a few
-                // milliseconds per frame.
-                if let Some(highlight) = &mut self.highlight {
-                    let lines = &self.lines;
-                    let source = &*text;
-                    let line_text = |i: usize| {
-                        let start = *lines.get(i)?;
-                        let mut end = lines.get(i + 1).map_or(source.len(), |&n| n - 1);
-                        if end > start && source.as_bytes()[end - 1] == b'\r' {
-                            end -= 1;
-                        }
-                        Some(source[start..end].to_string())
-                    };
-                    if !highlight.advance(line_text, lines.len(), HIGHLIGHT_BUDGET) {
-                        ui.ctx().request_repaint();
+            }
+            gutter_response.context_menu(|ui| {
+                crate::ui::menu_begin(ui);
+                if opt.gutter_commands.is_empty() {
+                    crate::ui::menu_entry(ui, None, tr!("no_actions"), None, false, false);
+                }
+                for (plugin, command) in opt.gutter_commands {
+                    if crate::ui::menu_item(ui, None, &command.label, None, false).clicked() {
+                        output.command = Some((*plugin, command.id));
+                        ui.close();
                     }
                 }
-                let painter = ui.painter().clone();
-                let pair = self.matching_bracket(text);
-                let caret_line = self.line_of(self.cursor);
-                let selection = self.selection();
-                let extra_selections = self.extra_selections();
-                let extra_cursors = self.extra_cursors();
-                let text_left = origin.x + text_x;
-                self.swatch_rects.clear();
-                for shown in first..last {
-                    let index = self.line_at(shown);
-                    let y = origin.y + shown as f32 * row;
-                    let row_rect = Rect::from_min_max(
-                        pos2(origin.x, y),
-                        pos2(rect.right().max(ui.clip_rect().right()), y + row),
-                    );
-                    if index == caret_line && selection.is_empty() {
-                        painter.rect_filled(row_rect, 0.0, t.caret_row);
+            });
+
+            let first = ((viewport.min.y / row).floor().max(0.0) as usize).min(self.row_count());
+            // The viewport may be unbounded on the first frame of a tab: `as usize` then
+            // gives usize::MAX, and `+ 1` wrapped to 0 in release, an empty frame.
+            let last = ((viewport.max.y / row).ceil() as usize)
+                .saturating_add(1)
+                .min(self.row_count());
+            self.hints_frame(
+                ui,
+                text,
+                opt,
+                self.line_at(first),
+                self.line_at(last.saturating_sub(1)),
+            );
+            // Highlighting: the visible lines first, then the rest of the file, a few
+            // milliseconds per frame.
+            if let Some(highlight) = &mut self.highlight {
+                let lines = &self.lines;
+                let source = &*text;
+                let line_text = |i: usize| {
+                    let start = *lines.get(i)?;
+                    let mut end = lines.get(i + 1).map_or(source.len(), |&n| n - 1);
+                    if end > start && source.as_bytes()[end - 1] == b'\r' {
+                        end -= 1;
                     }
-                    let galley = self.galley(ui, text, index, opt);
-                    let range = self.line_range(text, index);
-                    // Selection on this line, including its line break.
-                    let line_end = self.lines.get(index + 1).copied().unwrap_or(text.len());
-                    for selection in std::iter::once(&selection).chain(&extra_selections) {
-                        if selection.start < line_end.max(range.end + 1)
-                            && selection.end > range.start
-                            && !selection.is_empty()
-                        {
-                            let line = self.line(text, index);
-                            let from = column_of(line, selection.start.saturating_sub(range.start));
-                            let to_end = selection.end > range.end;
-                            let to = column_of(
-                                line,
-                                selection.end.min(range.end)
-                                    - range.start.min(selection.end.min(range.end)),
-                            );
-                            let x0 = galley
+                    Some(source[start..end].to_string())
+                };
+                if !highlight.advance(line_text, lines.len(), HIGHLIGHT_BUDGET) {
+                    ui.ctx().request_repaint();
+                }
+            }
+            let painter = ui.painter().clone();
+            let pair = self.matching_bracket(text);
+            let caret_line = self.line_of(self.cursor);
+            let selection = self.selection();
+            let extra_selections = self.extra_selections();
+            let extra_cursors = self.extra_cursors();
+            let text_left = origin.x + text_x;
+            self.swatch_rects.clear();
+            for shown in first..last {
+                let index = self.line_at(shown);
+                let y = origin.y + shown as f32 * row;
+                let row_rect = Rect::from_min_max(
+                    pos2(origin.x, y),
+                    pos2(rect.right().max(ui.clip_rect().right()), y + row),
+                );
+                if let Ok(i) = opt.line_colors.binary_search_by_key(&index, |(l, _)| *l) {
+                    painter.rect_filled(row_rect, 0.0, opt.line_colors[i].1);
+                }
+                if index == caret_line && selection.is_empty() {
+                    painter.rect_filled(row_rect, 0.0, t.caret_row);
+                }
+                let galley = self.galley(ui, text, index, opt);
+                let range = self.line_range(text, index);
+                // Selection on this line, including its line break.
+                let line_end = self.lines.get(index + 1).copied().unwrap_or(text.len());
+                for selection in std::iter::once(&selection).chain(&extra_selections) {
+                    if selection.start < line_end.max(range.end + 1)
+                        && selection.end > range.start
+                        && !selection.is_empty()
+                    {
+                        let line = self.line(text, index);
+                        let from = column_of(line, selection.start.saturating_sub(range.start));
+                        let to_end = selection.end > range.end;
+                        let to = column_of(
+                            line,
+                            selection.end.min(range.end)
+                                - range.start.min(selection.end.min(range.end)),
+                        );
+                        let x0 = galley
+                            .pos_from_cursor(CCursor::new(self.visual_column(text, index, from)))
+                            .min
+                            .x;
+                        let x1 = galley
+                            .pos_from_cursor(CCursor::new(self.visual_column(text, index, to)))
+                            .min
+                            .x
+                            + if to_end { char_width * 0.6 } else { 0.0 };
+                        painter.rect_filled(
+                            Rect::from_min_max(
+                                pos2(text_left + x0, y),
+                                pos2(text_left + x1, y + row),
+                            ),
+                            0.0,
+                            t.text_selection,
+                        );
+                    }
+                }
+                self.range_highlights(
+                    &painter,
+                    text,
+                    range.clone(),
+                    &galley,
+                    text_left,
+                    y,
+                    row,
+                    Color32::from_rgba_unmultiplied(255, 200, 40, 70),
+                    opt.search,
+                );
+                self.usage_highlights(
+                    &painter,
+                    text,
+                    range.clone(),
+                    &galley,
+                    text_left,
+                    y,
+                    row,
+                    t.accent.gamma_multiply(0.2),
+                );
+                self.bracket_highlights(
+                    &painter,
+                    text,
+                    range.clone(),
+                    &galley,
+                    text_left,
+                    y,
+                    row,
+                    t.accent.gamma_multiply(0.35),
+                    pair,
+                );
+                painter.galley(
+                    pos2(text_left, y + (row - galley.size().y) / 2.0),
+                    galley.clone(),
+                    t.text,
+                );
+                if !self.swatches.is_empty() {
+                    self.paint_text_swatches(
+                        &painter, text, index, &galley, text_left, y, row, char_width, t,
+                    );
+                }
+                self.squiggles(
+                    &painter,
+                    text,
+                    range.clone(),
+                    &galley,
+                    text_left,
+                    y,
+                    row,
+                    char_width,
+                );
+                // What Ctrl+click would follow: an address, or a word that leads somewhere.
+                if let Some(link) = self.url_hover.as_ref().or(self.goto_link()) {
+                    self.link_underline(
+                        &painter,
+                        text,
+                        link,
+                        range.clone(),
+                        &galley,
+                        text_left,
+                        y,
+                        row,
+                        t.link,
+                    );
+                }
+                if index == caret_line && focused {
+                    let blink = self.activity.elapsed().as_secs_f32();
+                    if blink < 0.6 || ((blink * 1.2) as u32).is_multiple_of(2) {
+                        let column = column_of(self.line(text, index), self.cursor - range.start);
+                        let x = text_left
+                            + galley
                                 .pos_from_cursor(CCursor::new(
-                                    self.visual_column(text, index, from),
+                                    self.visual_column(text, index, column),
                                 ))
                                 .min
                                 .x;
-                            let x1 = galley
-                                .pos_from_cursor(CCursor::new(self.visual_column(text, index, to)))
+                        painter.line_segment(
+                            [pos2(x, y + 1.0), pos2(x, y + row - 1.0)],
+                            Stroke::new(2.0_f32, t.text),
+                        );
+                        let caret = Rect::from_min_size(pos2(x, y), vec2(2.0, row));
+                        ui.ctx().output_mut(|o| {
+                            o.ime = Some(egui::output::IMEOutput {
+                                purpose: egui::IMEPurpose::Normal,
+                                rect,
+                                cursor_rect: caret,
+                                should_interrupt_composition: false,
+                            })
+                        });
+                    }
+                    ui.ctx().request_repaint_after(Duration::from_millis(500));
+                }
+                // The other carets.
+                if focused {
+                    for &cursor in &extra_cursors {
+                        if cursor < range.start || cursor > range.end {
+                            continue;
+                        }
+                        let column = column_of(self.line(text, index), cursor - range.start);
+                        let x = text_left
+                            + galley
+                                .pos_from_cursor(CCursor::new(
+                                    self.visual_column(text, index, column),
+                                ))
                                 .min
-                                .x
-                                + if to_end { char_width * 0.6 } else { 0.0 };
-                            painter.rect_filled(
-                                Rect::from_min_max(
-                                    pos2(text_left + x0, y),
-                                    pos2(text_left + x1, y + row),
-                                ),
-                                0.0,
-                                t.text_selection,
-                            );
-                        }
-                    }
-                    self.range_highlights(
-                        &painter,
-                        text,
-                        range.clone(),
-                        &galley,
-                        text_left,
-                        y,
-                        row,
-                        Color32::from_rgba_unmultiplied(255, 200, 40, 70),
-                        opt.search,
-                    );
-                    self.usage_highlights(
-                        &painter,
-                        text,
-                        range.clone(),
-                        &galley,
-                        text_left,
-                        y,
-                        row,
-                        t.accent.gamma_multiply(0.2),
-                    );
-                    self.bracket_highlights(
-                        &painter,
-                        text,
-                        range.clone(),
-                        &galley,
-                        text_left,
-                        y,
-                        row,
-                        t.accent.gamma_multiply(0.35),
-                        pair,
-                    );
-                    painter.galley(
-                        pos2(text_left, y + (row - galley.size().y) / 2.0),
-                        galley.clone(),
-                        t.text,
-                    );
-                    if !self.swatches.is_empty() {
-                        self.paint_text_swatches(
-                            &painter, text, index, &galley, text_left, y, row, char_width, t,
+                                .x;
+                        painter.line_segment(
+                            [pos2(x, y + 1.0), pos2(x, y + row - 1.0)],
+                            Stroke::new(2.0_f32, t.text),
                         );
-                    }
-                    self.squiggles(
-                        &painter,
-                        text,
-                        range.clone(),
-                        &galley,
-                        text_left,
-                        y,
-                        row,
-                        char_width,
-                    );
-                    // What Ctrl+click would follow: an address, or a word that leads somewhere.
-                    if let Some(link) = self.url_hover.as_ref().or(self.goto_link()) {
-                        self.link_underline(
-                            &painter,
-                            text,
-                            link,
-                            range.clone(),
-                            &galley,
-                            text_left,
-                            y,
-                            row,
-                            t.link,
-                        );
-                    }
-                    if index == caret_line && focused {
-                        let blink = self.activity.elapsed().as_secs_f32();
-                        if blink < 0.6 || ((blink * 1.2) as u32).is_multiple_of(2) {
-                            let column =
-                                column_of(self.line(text, index), self.cursor - range.start);
-                            let x = text_left
-                                + galley
-                                    .pos_from_cursor(CCursor::new(
-                                        self.visual_column(text, index, column),
-                                    ))
-                                    .min
-                                    .x;
-                            painter.line_segment(
-                                [pos2(x, y + 1.0), pos2(x, y + row - 1.0)],
-                                Stroke::new(2.0_f32, t.text),
-                            );
-                            let caret = Rect::from_min_size(pos2(x, y), vec2(2.0, row));
-                            ui.ctx().output_mut(|o| {
-                                o.ime = Some(egui::output::IMEOutput {
-                                    purpose: egui::IMEPurpose::Normal,
-                                    rect,
-                                    cursor_rect: caret,
-                                    should_interrupt_composition: false,
-                                })
-                            });
-                        }
-                        ui.ctx().request_repaint_after(Duration::from_millis(500));
-                    }
-                    // The other carets.
-                    if focused {
-                        for &cursor in &extra_cursors {
-                            if cursor < range.start || cursor > range.end {
-                                continue;
-                            }
-                            let column = column_of(self.line(text, index), cursor - range.start);
-                            let x = text_left
-                                + galley
-                                    .pos_from_cursor(CCursor::new(
-                                        self.visual_column(text, index, column),
-                                    ))
-                                    .min
-                                    .x;
-                            painter.line_segment(
-                                [pos2(x, y + 1.0), pos2(x, y + row - 1.0)],
-                                Stroke::new(2.0_f32, t.text),
-                            );
-                        }
                     }
                 }
-                if !opt.read_only && self.color_picker(ui, id, text, t) {
-                    output.changed = true;
+            }
+            if !opt.read_only && self.color_picker(ui, id, text, t) {
+                output.changed = true;
+            }
+            // Gutter, fixed while the text scrolls horizontally underneath.
+            let left = origin.x + viewport.min.x;
+            let visible = Rect::from_min_max(
+                pos2(left, origin.y + viewport.min.y),
+                pos2(left + gutter, origin.y + viewport.max.y),
+            );
+            painter.rect_filled(visible, 0.0, t.island);
+            let marks_at = |index: usize| opt.marks.iter().filter(move |m| m.line == index);
+            // The change under the mouse, to show what its lines were.
+            let mut change_tip: Option<(MarkKind, std::sync::Arc<str>)> = None;
+            let gutter_hot = hover_pos.is_some_and(|p| visible.contains(p));
+            let bulb = opt.assist.as_ref().and_then(|_| self.bulb());
+            for shown in first..last {
+                let index = self.line_at(shown);
+                let y = origin.y + shown as f32 * row;
+                if index == caret_line && selection.is_empty() {
+                    painter.rect_filled(
+                        Rect::from_min_max(pos2(left, y), pos2(left + gutter, y + row)),
+                        0.0,
+                        t.caret_row,
+                    );
                 }
-                // Gutter, fixed while the text scrolls horizontally underneath.
-                let left = origin.x + viewport.min.x;
-                let visible = Rect::from_min_max(
-                    pos2(left, origin.y + viewport.min.y),
-                    pos2(left + gutter, origin.y + viewport.max.y),
-                );
-                painter.rect_filled(visible, 0.0, t.island);
-                let marks_at = |index: usize| opt.marks.iter().filter(move |m| m.line == index);
-                // The change under the mouse, to show what its lines were.
-                let mut change_tip: Option<(MarkKind, std::sync::Arc<str>)> = None;
-                let gutter_hot = hover_pos.is_some_and(|p| visible.contains(p));
-                let bulb = opt.assist.as_ref().and_then(|_| self.bulb());
-                for shown in first..last {
-                    let index = self.line_at(shown);
-                    let y = origin.y + shown as f32 * row;
-                    if index == caret_line && selection.is_empty() {
-                        painter.rect_filled(
-                            Rect::from_min_max(pos2(left, y), pos2(left + gutter, y + row)),
-                            0.0,
-                            t.caret_row,
+                if let Some((_, severity)) = bulb.filter(|(l, _)| *l == index) {
+                    let center = pos2(left + marks_x + 5.0, y + row / 2.0);
+                    paint_bulb(&painter, center, assist::severity_color(severity));
+                    let zone = Rect::from_center_size(center, vec2(10.0, row));
+                    let tip = ui.interact(zone, id.with("bulb"), egui::Sense::hover());
+                    if tip.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    tip.on_hover_text(tr!("show_fixes"));
+                }
+                if let Some(open) = self.region_at(index).map(|r| r.open) {
+                    let folded = self.folded.contains(&open);
+                    if folded || gutter_hot {
+                        crate::ui::paint_chevron(
+                            ui,
+                            pos2(left + marks_x + 20.0, y + row / 2.0),
+                            !folded,
                         );
                     }
-                    if let Some((_, severity)) = bulb.filter(|(l, _)| *l == index) {
-                        let center = pos2(left + marks_x + 5.0, y + row / 2.0);
-                        paint_bulb(&painter, center, assist::severity_color(severity));
-                        let zone = Rect::from_center_size(center, vec2(10.0, row));
-                        let tip = ui.interact(zone, id.with("bulb"), egui::Sense::hover());
-                        if tip.hovered() {
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                        }
-                        tip.on_hover_text(tr!("show_fixes"));
-                    }
-                    if let Some(open) = self.region_at(index).map(|r| r.open) {
-                        let folded = self.folded.contains(&open);
-                        if folded || gutter_hot {
-                            crate::ui::paint_chevron(
-                                ui,
-                                pos2(left + marks_x + 20.0, y + row / 2.0),
-                                !folded,
-                            );
-                        }
-                    }
-                    if let Some(annotation) = annotations.get(index) {
-                        painter.text(
-                            pos2(left + annotation_x, y + row / 2.0),
-                            egui::Align2::LEFT_CENTER,
-                            annotation,
-                            opt.font.clone(),
-                            t.text_secondary,
-                        );
-                    }
-                    let color = if index == caret_line {
-                        t.line_number_current
-                    } else {
-                        t.line_number
-                    };
+                }
+                if let Some(annotation) = annotations.get(index) {
+                    painter.text(
+                        pos2(left + annotation_x, y + row / 2.0),
+                        egui::Align2::LEFT_CENTER,
+                        annotation,
+                        opt.font.clone(),
+                        t.text_secondary,
+                    );
+                }
+                let color = if index == caret_line {
+                    t.line_number_current
+                } else {
+                    t.line_number
+                };
+                if opt.line_numbers {
                     painter.text(
                         pos2(left + marks_x - 6.0, y + row / 2.0),
                         egui::Align2::RIGHT_CENTER,
@@ -3052,122 +3119,123 @@ impl EditorState {
                         opt.font.clone(),
                         color,
                     );
-                    if let Some((_, number)) = opt.bookmarks.iter().find(|(l, _)| *l == index) {
-                        let x = left + 3.0;
-                        // A numbered one is wider, to hold its digit.
-                        let w = if number.is_some() { 11.0 } else { 7.0 };
+                }
+                if let Some((_, number)) = opt.bookmarks.iter().find(|(l, _)| *l == index) {
+                    let x = left + 3.0;
+                    // A numbered one is wider, to hold its digit.
+                    let w = if number.is_some() { 11.0 } else { 7.0 };
+                    painter.add(egui::Shape::convex_polygon(
+                        vec![
+                            pos2(x, y + 2.0),
+                            pos2(x + w, y + 2.0),
+                            pos2(x + w, y + row - 2.0),
+                            pos2(x + w / 2.0, y + row - 5.0),
+                            pos2(x, y + row - 2.0),
+                        ],
+                        t.accent,
+                        Stroke::NONE,
+                    ));
+                    if let Some(n) = number {
+                        painter.text(
+                            pos2(x + w / 2.0, y + (row - 4.0) / 2.0 + 2.0),
+                            egui::Align2::CENTER_CENTER,
+                            n.to_string(),
+                            FontId::proportional(9.0),
+                            Color32::WHITE,
+                        );
+                    }
+                }
+                for mark in marks_at(index) {
+                    let x = left + marks_x + 2.0;
+                    let zone = if mark.kind == MarkKind::Deleted {
                         painter.add(egui::Shape::convex_polygon(
-                            vec![
-                                pos2(x, y + 2.0),
-                                pos2(x + w, y + 2.0),
-                                pos2(x + w, y + row - 2.0),
-                                pos2(x + w / 2.0, y + row - 5.0),
-                                pos2(x, y + row - 2.0),
-                            ],
-                            t.accent,
+                            vec![pos2(x, y - 4.0), pos2(x + 6.0, y), pos2(x, y + 4.0)],
+                            mark.kind.color(),
                             Stroke::NONE,
                         ));
-                        if let Some(n) = number {
-                            painter.text(
-                                pos2(x + w / 2.0, y + (row - 4.0) / 2.0 + 2.0),
-                                egui::Align2::CENTER_CENTER,
-                                n.to_string(),
-                                FontId::proportional(9.0),
-                                Color32::WHITE,
-                            );
-                        }
-                    }
-                    for mark in marks_at(index) {
-                        let x = left + marks_x + 2.0;
-                        let zone = if mark.kind == MarkKind::Deleted {
-                            painter.add(egui::Shape::convex_polygon(
-                                vec![pos2(x, y - 4.0), pos2(x + 6.0, y), pos2(x, y + 4.0)],
-                                mark.kind.color(),
-                                Stroke::NONE,
-                            ));
-                            Rect::from_min_max(pos2(x - 2.0, y - 5.0), pos2(x + 8.0, y + 5.0))
-                        } else {
-                            // One bar over the lines of a block: no gap with a neighbour of the
-                            // same kind, rounded at its ends only.
-                            let joined = |line: Option<usize>| {
-                                line.is_some_and(|l| marks_at(l).any(|m| m.kind == mark.kind))
-                            };
-                            let above = joined(index.checked_sub(1));
-                            let below = joined(Some(index + 1));
-                            let top = if above { y } else { y + 1.0 };
-                            let bottom = if below { y + row } else { y + row - 1.0 };
-                            let radius = egui::CornerRadius {
-                                nw: if above { 0 } else { 1 },
-                                ne: if above { 0 } else { 1 },
-                                sw: if below { 0 } else { 1 },
-                                se: if below { 0 } else { 1 },
-                            };
-                            painter.rect_filled(
-                                Rect::from_min_max(pos2(x, top), pos2(x + 3.0, bottom)),
-                                radius,
-                                mark.kind.color(),
-                            );
-                            Rect::from_min_max(pos2(x - 2.0, y), pos2(x + 7.0, y + row))
+                        Rect::from_min_max(pos2(x - 2.0, y - 5.0), pos2(x + 8.0, y + 5.0))
+                    } else {
+                        // One bar over the lines of a block: no gap with a neighbour of the
+                        // same kind, rounded at its ends only.
+                        let joined = |line: Option<usize>| {
+                            line.is_some_and(|l| marks_at(l).any(|m| m.kind == mark.kind))
                         };
-                        if let (Some(before), Some(pointer)) = (&mark.before, hover_pos)
-                            && zone.contains(pointer)
-                        {
-                            change_tip = Some((mark.kind, before.clone()));
-                        }
-                    }
-                }
-                if let Some(area) = sticky_rect {
-                    let full = Rect::from_min_size(
-                        area.min,
-                        vec2(area.width().max(ui.clip_rect().width()), area.height()),
-                    );
-                    painter.rect_filled(full, 0.0, t.island);
-                    for (i, &line) in sticky.iter().enumerate() {
-                        let y = area.top() + i as f32 * row;
-                        let galley = self.galley(ui, text, line, opt);
-                        painter.galley(
-                            pos2(text_left, y + (row - galley.size().y) / 2.0),
-                            galley,
-                            t.text,
-                        );
+                        let above = joined(index.checked_sub(1));
+                        let below = joined(Some(index + 1));
+                        let top = if above { y } else { y + 1.0 };
+                        let bottom = if below { y + row } else { y + row - 1.0 };
+                        let radius = egui::CornerRadius {
+                            nw: if above { 0 } else { 1 },
+                            ne: if above { 0 } else { 1 },
+                            sw: if below { 0 } else { 1 },
+                            se: if below { 0 } else { 1 },
+                        };
                         painter.rect_filled(
-                            Rect::from_min_size(pos2(left, y), vec2(gutter, row)),
-                            0.0,
-                            t.island,
+                            Rect::from_min_max(pos2(x, top), pos2(x + 3.0, bottom)),
+                            radius,
+                            mark.kind.color(),
                         );
-                        painter.text(
-                            pos2(left + marks_x - 6.0, y + row / 2.0),
-                            egui::Align2::RIGHT_CENTER,
-                            (line + 1).to_string(),
-                            opt.font.clone(),
-                            t.line_number,
-                        );
+                        Rect::from_min_max(pos2(x - 2.0, y), pos2(x + 7.0, y + row))
+                    };
+                    if let (Some(before), Some(pointer)) = (&mark.before, hover_pos)
+                        && zone.contains(pointer)
+                    {
+                        change_tip = Some((mark.kind, before.clone()));
                     }
-                    painter.line_segment(
-                        [full.left_bottom(), full.right_bottom()],
-                        Stroke::new(1.0_f32, t.separator),
+                }
+            }
+            if let Some(area) = sticky_rect {
+                let full = Rect::from_min_size(
+                    area.min,
+                    vec2(area.width().max(ui.clip_rect().width()), area.height()),
+                );
+                painter.rect_filled(full, 0.0, t.island);
+                for (i, &line) in sticky.iter().enumerate() {
+                    let y = area.top() + i as f32 * row;
+                    let galley = self.galley(ui, text, line, opt);
+                    painter.galley(
+                        pos2(text_left, y + (row - galley.size().y) / 2.0),
+                        galley,
+                        t.text,
+                    );
+                    painter.rect_filled(
+                        Rect::from_min_size(pos2(left, y), vec2(gutter, row)),
+                        0.0,
+                        t.island,
+                    );
+                    painter.text(
+                        pos2(left + marks_x - 6.0, y + row / 2.0),
+                        egui::Align2::RIGHT_CENTER,
+                        (line + 1).to_string(),
+                        opt.font.clone(),
+                        t.line_number,
                     );
                 }
-                if let Some((kind, before)) = change_tip {
-                    change_tooltip(ui, kind, &before, opt.font.clone());
-                }
-                self.assist_paint(ui, text, opt, origin, text_left, row, hover_pos);
-                self.intel_paint(ui, text, opt, origin, text_left, row);
-                if self.scroll_to_cursor {
-                    self.scroll_to_cursor = false;
-                    let line = self.line_of(self.cursor);
-                    let column = column_of(self.line(text, line), self.cursor - self.lines[line]);
-                    let x = origin.x + text_x + column as f32 * char_width;
-                    let y = origin.y + self.row_of(line) as f32 * row;
-                    let target = Rect::from_min_max(
-                        pos2(x - gutter - 2.0 * char_width, y - row),
-                        pos2(x + 4.0 * char_width, y + 2.0 * row),
-                    );
-                    // At once: a jump (Ctrl + click, a usage, a result) is not animated.
-                    ui.scroll_to_rect_animation(target, None, egui::style::ScrollAnimation::none());
-                }
-                let _: Color32 = t.text;
-            });
+                painter.line_segment(
+                    [full.left_bottom(), full.right_bottom()],
+                    Stroke::new(1.0_f32, t.separator),
+                );
+            }
+            if let Some((kind, before)) = change_tip {
+                change_tooltip(ui, kind, &before, opt.font.clone());
+            }
+            self.assist_paint(ui, text, opt, origin, text_left, row, hover_pos);
+            self.intel_paint(ui, text, opt, origin, text_left, row);
+            if self.scroll_to_cursor {
+                self.scroll_to_cursor = false;
+                let line = self.line_of(self.cursor);
+                let column = column_of(self.line(text, line), self.cursor - self.lines[line]);
+                let x = origin.x + text_x + column as f32 * char_width;
+                let y = origin.y + self.row_of(line) as f32 * row;
+                let target = Rect::from_min_max(
+                    pos2(x - gutter - 2.0 * char_width, y - row),
+                    pos2(x + 4.0 * char_width, y + 2.0 * row),
+                );
+                // At once: a jump (Ctrl + click, a usage, a result) is not animated.
+                ui.scroll_to_rect_animation(target, None, egui::style::ScrollAnimation::none());
+            }
+            let _: Color32 = t.text;
+        });
         if self.reveal_cursor() {
             self.scroll_to_cursor = true;
             ui.ctx().request_repaint();
@@ -3178,6 +3246,9 @@ impl EditorState {
             let pos = self.lines[line.min(self.lines.len() - 1)];
             self.select(pos, pos);
         }
+        let shown = area.state.clamped_offset().y / row;
+        let first = (shown as usize).min(self.row_count().saturating_sub(1));
+        self.top_line = self.line_at(first) as f32 + shown.fract();
         let range = (area.content_size.y - area.inner_rect.height()).max(1.0);
         let fraction = (area.state.clamped_offset().y / range).clamp(0.0, 1.0);
         output.scrolled = (fraction - self.scroll_fraction).abs() > 0.0005;

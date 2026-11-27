@@ -1,7 +1,7 @@
 //! Built-in Git plugin, modeled on IntelliJ's version control integration.
 
 mod conflict;
-mod diff;
+pub(crate) mod diff;
 pub mod github;
 mod graph;
 mod plugin;

@@ -1,6 +1,6 @@
 use super::*;
 
-fn ide() -> Ide {
+pub(super) fn ide() -> Ide {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .canonicalize()
         .unwrap();

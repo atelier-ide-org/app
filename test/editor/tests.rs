@@ -297,3 +297,42 @@ fn a_text_changed_elsewhere_with_the_same_length_is_indexed_again() {
     assert_eq!(s.word_at(after, 2), 0..7);
     assert_eq!(column_of("aé", 2), 1);
 }
+
+fn change(len: usize, group: u64) -> Change {
+    Change {
+        at: 0,
+        removed: String::new(),
+        inserted: "x".repeat(len),
+        before: (0, 0),
+        after: (0, 0),
+        group,
+    }
+}
+
+#[test]
+fn undo_history_is_bounded() {
+    let mut undo: Vec<Change> = (0..MAX_UNDO_STEPS + 50).map(|_| change(1, 0)).collect();
+    trim_undo(&mut undo);
+    assert_eq!(undo.len(), MAX_UNDO_STEPS);
+    // Two big replacements are past the bytes: the oldest goes, the newest stays even alone.
+    let mut undo = vec![change(MAX_UNDO_BYTES, 0), change(MAX_UNDO_BYTES, 0)];
+    trim_undo(&mut undo);
+    assert_eq!(undo.len(), 1);
+    let mut undo = vec![change(MAX_UNDO_BYTES * 2, 0)];
+    trim_undo(&mut undo);
+    assert_eq!(undo.len(), 1);
+}
+
+#[test]
+fn trimming_the_undo_history_keeps_a_keystroke_whole() {
+    // The changes of one keystroke at three carets: dropping the first drops the others too.
+    let mut undo = vec![
+        change(MAX_UNDO_BYTES, 7),
+        change(1, 7),
+        change(1, 7),
+        change(1, 0),
+    ];
+    trim_undo(&mut undo);
+    assert_eq!(undo.len(), 1);
+    assert_eq!(undo[0].group, 0);
+}

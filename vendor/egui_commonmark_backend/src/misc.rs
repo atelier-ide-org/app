@@ -827,25 +827,45 @@ bitflags! {
 pub struct CommonMarkCache {
     // Everything stored in `CommonMarkCache` must take into account that
     // the cache is for multiple `CommonMarkviewer`s with different source_ids.
+    // Atelier: the syntaxes and themes are shared by every cache of the process (see
+    // `shared_syntaxes`) instead of loaded by each: syntect compiles the regexes of a language
+    // the first time it is used, megabytes that each cache paid again.
     #[cfg(feature = "better_syntax_highlighting")]
-    ps: SyntaxSet,
+    ps: std::sync::Arc<SyntaxSet>,
 
     #[cfg(feature = "better_syntax_highlighting")]
-    ts: ThemeSet,
+    ts: std::sync::Arc<ThemeSet>,
 
     link_hooks: HashMap<String, bool>,
     viewers: HashMap<Id, ViewerCache>,
     pub(self) has_installed_loaders: bool,
 }
 
+/// Atelier: the default syntaxes and themes, loaded once for every cache of the process.
+#[cfg(feature = "better_syntax_highlighting")]
+fn shared_syntaxes() -> (std::sync::Arc<SyntaxSet>, std::sync::Arc<ThemeSet>) {
+    static SHARED: std::sync::OnceLock<(std::sync::Arc<SyntaxSet>, std::sync::Arc<ThemeSet>)> =
+        std::sync::OnceLock::new();
+    SHARED
+        .get_or_init(|| {
+            (
+                std::sync::Arc::new(SyntaxSet::load_defaults_newlines()),
+                std::sync::Arc::new(ThemeSet::load_defaults()),
+            )
+        })
+        .clone()
+}
+
 #[allow(clippy::derivable_impls)]
 impl Default for CommonMarkCache {
     fn default() -> Self {
+        #[cfg(feature = "better_syntax_highlighting")]
+        let (ps, ts) = shared_syntaxes();
         Self {
             #[cfg(feature = "better_syntax_highlighting")]
-            ps: SyntaxSet::load_defaults_newlines(),
+            ps,
             #[cfg(feature = "better_syntax_highlighting")]
-            ts: ThemeSet::load_defaults(),
+            ts,
             link_hooks: HashMap::new(),
             viewers: HashMap::default(),
             has_installed_loaders: false,
@@ -854,11 +874,22 @@ impl Default for CommonMarkCache {
 }
 
 impl CommonMarkCache {
+    /// Atelier: the themes of this cache alone, copied from the shared ones before a change.
+    #[cfg(feature = "better_syntax_highlighting")]
+    fn themes_mut(&mut self) -> &mut ThemeSet {
+        if std::sync::Arc::get_mut(&mut self.ts).is_none() {
+            let mut own = ThemeSet::new();
+            own.themes = self.ts.themes.clone();
+            self.ts = std::sync::Arc::new(own);
+        }
+        std::sync::Arc::get_mut(&mut self.ts).expect("not shared")
+    }
+
     #[cfg(feature = "better_syntax_highlighting")]
     pub fn add_syntax_from_folder(&mut self, path: &str) {
-        let mut builder = self.ps.clone().into_builder();
+        let mut builder = (*self.ps).clone().into_builder();
         let _ = builder.add_from_folder(path, true);
-        self.ps = builder.build();
+        self.ps = std::sync::Arc::new(builder.build());
     }
 
     #[cfg(feature = "better_syntax_highlighting")]
@@ -867,9 +898,9 @@ impl CommonMarkCache {
         s: &str,
         fallback_name: Option<&str>,
     ) -> Result<(), syntect::parsing::ParseSyntaxError> {
-        let mut builder = self.ps.clone().into_builder();
+        let mut builder = (*self.ps).clone().into_builder();
         SyntaxDefinition::load_from_str(s, true, fallback_name).map(|d| builder.add(d))?;
-        self.ps = builder.build();
+        self.ps = std::sync::Arc::new(builder.build());
         Ok(())
     }
 
@@ -881,7 +912,7 @@ impl CommonMarkCache {
         &mut self,
         path: impl AsRef<std::path::Path>,
     ) -> Result<(), syntect::LoadingError> {
-        self.ts.add_from_folder(path)
+        self.themes_mut().add_from_folder(path)
     }
 
     #[cfg(feature = "better_syntax_highlighting")]
@@ -894,9 +925,10 @@ impl CommonMarkCache {
         bytes: &[u8],
     ) -> Result<(), syntect::LoadingError> {
         let mut cursor = std::io::Cursor::new(bytes);
-        self.ts
+        let theme = ThemeSet::load_from_reader(&mut cursor)?;
+        self.themes_mut()
             .themes
-            .insert(name.into(), ThemeSet::load_from_reader(&mut cursor)?);
+            .insert(name.into(), theme);
         Ok(())
     }
 

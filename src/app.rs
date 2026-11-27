@@ -42,6 +42,7 @@ mod run_configs;
 mod settings_page;
 mod split;
 mod symbols;
+mod terminal_windows;
 use crate::editor::FormatRequest;
 use settings_page::{Draft, Page, RunTool};
 
@@ -644,10 +645,18 @@ pub struct Ide {
     group_count: u64,
     windows: Vec<groups::Window>,
     window_count: u64,
+    /// Terminal tabs in windows of their own.
+    terminal_windows: Vec<terminal_windows::TerminalWindow>,
     /// The tab being dragged, and the window it was grabbed in.
     tab_drag: Option<(groups::TabDrag, egui::ViewportId)>,
     /// The groups of each window and their place, where a dragged tab may be dropped.
     drop_targets: std::collections::HashMap<egui::ViewportId, Vec<(u64, Rect)>>,
+    /// Where each window is on the screen (the top left corner of its content).
+    viewport_origins: std::collections::HashMap<egui::ViewportId, egui::Pos2>,
+    /// The group of another window a tab dragged out of its window would land on, and the side.
+    cross_drop: Option<(egui::ViewportId, u64, groups::Side)>,
+    /// Windows of their own (by a group of theirs) going back into the main window.
+    attach_requests: Vec<u64>,
     /// The tab bar of the main group, where a dragged tab is moved rather than dropped.
     main_bar: Option<Rect>,
     /// A saved version of the active file, set against the text now (Local History).
@@ -942,8 +951,12 @@ impl Ide {
             group_count: 0,
             windows: Vec::new(),
             window_count: 0,
+            terminal_windows: Vec::new(),
             tab_drag: None,
             drop_targets: std::collections::HashMap::new(),
+            viewport_origins: std::collections::HashMap::new(),
+            cross_drop: None,
+            attach_requests: Vec::new(),
             main_bar: None,
             comparison: None,
             inspection: None,
@@ -1127,12 +1140,19 @@ impl Ide {
     fn save_session(&self, path: &Path) -> anyhow::Result<()> {
         let session = Session {
             root: self.root.clone(),
+            // A diff is not a document to restore: it is opened again from Git.
             documents: self
                 .documents
                 .iter()
+                .filter(|d| d.diff.is_none())
                 .map(|d| (d.path.clone(), d.text.clone()))
                 .collect(),
-            active: self.active,
+            active: self
+                .documents
+                .iter()
+                .take(self.active)
+                .filter(|d| d.diff.is_none())
+                .count(),
             show_terminal: self.show_terminal,
             show_project: self.show_project,
             expanded: self.expanded.clone(),
@@ -1506,6 +1526,7 @@ impl Ide {
         self.file_index.invalidate();
         self.expanded = BTreeSet::from([self.root.clone()]);
         self.terminals.clear();
+        self.terminal_windows.clear();
         self.terminal_error.clear();
         let root = self.root.clone();
         self.remember(&root);
@@ -4479,7 +4500,6 @@ impl Ide {
         let mut restart = false;
         let mut new_shell: Option<Shell> = None;
         let mut split: Option<bool> = None;
-        let mut drop: Option<(u64, bool, bool)> = None;
         let hide = self.tool_header(ui, "Terminal", |ide, ui| {
             if ui::icon_button(ui, "rerun", tr!("restart_shell")).clicked() {
                 restart = true;
@@ -4521,6 +4541,7 @@ impl Ide {
         let mut select = None;
         let mut close = None;
         let mut close_pane = false;
+        let mut detach: Option<usize> = None;
         let mut tab_rects: Vec<Rect> = Vec::new();
         for (index, tab) in self.terminals.iter().enumerate() {
             let galley = ui.painter().layout_no_wrap(
@@ -4621,6 +4642,18 @@ impl Ide {
                     split = Some(true);
                     ui.close();
                 }
+                if ui::menu_item(
+                    ui,
+                    Some("openNewTab"),
+                    tr!("open_in_new_window"),
+                    None,
+                    false,
+                )
+                .clicked()
+                {
+                    detach = Some(index);
+                    ui.close();
+                }
                 ui::menu_separator(ui);
                 if tab.count() > 1
                     && ui::menu_item(ui, None, tr!("close_pane"), None, false).clicked()
@@ -4640,6 +4673,9 @@ impl Ide {
         }
         if let Some(index) = close {
             self.close_terminal(index);
+        } else if let Some(index) = detach {
+            self.detach_terminal(index, None);
+            return;
         }
         if hide {
             self.show_terminal = false;
@@ -4656,270 +4692,24 @@ impl Ide {
         if restart {
             self.restart_terminal();
         }
-        // AIs started in the panes, to be offered the MCP server once the panes are drawn.
-        let mut mcp_offers: Vec<(u64, crate::plugins::builtins::mcp::agents::Agent)> = Vec::new();
-        // Files clicked in the output, opened once the panes are drawn.
-        let mut file_links: Vec<(PathBuf, Option<usize>, Option<usize>)> = Vec::new();
         let root = self.root.clone();
         let ai_watch = self.builtin_enabled("mcp");
-        // The menu of the terminal area (right click): applied once the panes are drawn.
-        let mut menu_split: Option<bool> = None;
-        let mut menu_close_pane = false;
-        let mut menu_close_tab = false;
-        egui::Frame::new()
-            .inner_margin(Margin {
-                left: 14,
-                right: 10,
-                top: 2,
-                bottom: 8,
-            })
-            .show(ui, |ui| {
-                if !self.terminal_error.is_empty() {
-                    ui.colored_label(t.error, &self.terminal_error);
-                }
-                let Some(tab) = self.terminals.get_mut(self.active_terminal) else {
-                    return;
-                };
-                if tab.count() == 1 && tab.root.leaves().first().is_some_and(|p| p.term.exited) {
-                    ui.colored_label(t.warning, tr!("session_ended_restart_open_new"));
-                }
-                const GAP: f32 = 6.0;
-                let full = ui.available_rect_before_wrap();
-                let (rects, dividers) = tab.root.layout(full, GAP);
-                let mut focused = None;
-                let mut pane_drag = None;
-                let split_view = tab.count() > 1;
-                const HEAD: f32 = 22.0;
-                let active_id = tab.active;
-                for (pane, rect) in tab.root.leaves_mut().into_iter().zip(rects.iter()) {
-                    if !pane.term.has_wake() {
-                        let ctx = ctx.clone();
-                        pane.term.on_output(move || ctx.request_repaint());
-                    }
-                    let mut body = *rect;
-                    if split_view {
-                        // The title of a pane: a handle to drag it elsewhere.
-                        let head = Rect::from_min_size(rect.min, vec2(rect.width(), HEAD));
-                        body.min.y += HEAD;
-                        let response = ui.interact(
-                            head,
-                            egui::Id::unique(("pane_head", pane.id)),
-                            Sense::click_and_drag(),
-                        );
-                        ui.painter().rect_filled(
-                            head,
-                            0.0,
-                            if pane.id == active_id {
-                                t.hover
-                            } else {
-                                t.frame
-                            },
-                        );
-                        if let Some(usage) = pane.term.pid().and_then(crate::stats::watch) {
-                            ui.painter().text(
-                                pos2(head.right() - 8.0, head.center().y),
-                                Align2::RIGHT_CENTER,
-                                crate::stats::format_usage(usage.0, usage.1),
-                                FontId::proportional(11.0),
-                                t.text_secondary,
-                            );
-                        }
-                        ui.painter().text(
-                            pos2(head.left() + 8.0, head.center().y),
-                            Align2::LEFT_CENTER,
-                            &pane.term.shell.name,
-                            FontId::proportional(12.0),
-                            if pane.id == active_id {
-                                t.text
-                            } else {
-                                t.text_secondary
-                            },
-                        );
-                        if response.clicked() {
-                            focused = Some(pane.id);
-                            pane.term.want_focus = true;
-                        }
-                        if response.dragged() && ui.input(|i| i.pointer.is_decidedly_dragging()) {
-                            pane_drag = Some(pane.id);
-                        }
-                        response.on_hover_cursor(egui::CursorIcon::Grab);
-                    }
-                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body));
-                    pane.term.ai_watch = ai_watch;
-                    // A right click on a selection copies it instead of opening the menu.
-                    let had_selection = pane.selection.any();
-                    let area = crate::terminal_ui::show(
-                        &mut child,
-                        &mut pane.term,
-                        &mut pane.selection,
-                        &t,
-                        &root,
-                    );
-                    if let Some(agent) = pane.term.pending_ai.take() {
-                        mcp_offers.push((pane.id, agent));
-                    }
-                    if let Some(place) = pane.term.open_file.take() {
-                        file_links.push(place);
-                    }
-                    if area.secondary_clicked() {
-                        focused = Some(pane.id);
-                    }
-                    let copied = had_selection && area.secondary_clicked();
-                    if !copied {
-                        area.context_menu(|ui| {
-                            ui::menu_begin(ui);
-                            if ui::menu_item(ui, None, tr!("paste"), Some("Ctrl+V"), false)
-                                .clicked()
-                            {
-                                // The clipboard comes back as a Paste event to the terminal,
-                                // which has the keyboard.
-                                ui.ctx()
-                                    .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
-                                ui.close();
-                            }
-                            ui::menu_separator(ui);
-                            if ui::menu_item(
-                                ui,
-                                Some("sideBySide"),
-                                tr!("split_right"),
-                                None,
-                                false,
-                            )
-                            .clicked()
-                            {
-                                menu_split = Some(false);
-                                ui.close();
-                            }
-                            if ui::menu_item(ui, Some("unified"), tr!("split_down"), None, false)
-                                .clicked()
-                            {
-                                menu_split = Some(true);
-                                ui.close();
-                            }
-                            ui::menu_separator(ui);
-                            if split_view
-                                && ui::menu_item(ui, None, tr!("close_pane"), None, false).clicked()
-                            {
-                                menu_close_pane = true;
-                                ui.close();
-                            }
-                            if ui::menu_item(ui, Some("closeSmall"), tr!("close_tab"), None, false)
-                                .clicked()
-                            {
-                                menu_close_tab = true;
-                                ui.close();
-                            }
-                        });
-                    }
-                    if pane.term.focused {
-                        focused = Some(pane.id);
-                    }
-                }
-                if pane_drag.is_some() {
-                    self.drag = pane_drag.map(Drag::Pane);
-                }
-                if let Some(id) = focused {
-                    tab.active = id;
-                }
-                // Dragging a divider moves the split. Interacting after the panes, with a
-                // wider area, makes it easy to grab.
-                let mut moves = Vec::new();
-                for (index, divider) in dividers.iter().enumerate() {
-                    let grab = divider
-                        .rect
-                        .expand(if divider.stacked { 0.0 } else { 3.0 })
-                        .expand2(if divider.stacked {
-                            vec2(0.0, 3.0)
-                        } else {
-                            vec2(0.0, 0.0)
-                        });
-                    let response = ui
-                        .interact(
-                            grab,
-                            egui::Id::unique(("terminal_divider", index)),
-                            Sense::drag(),
-                        )
-                        .on_hover_cursor(if divider.stacked {
-                            egui::CursorIcon::ResizeVertical
-                        } else {
-                            egui::CursorIcon::ResizeHorizontal
-                        });
-                    let line = if divider.stacked {
-                        Rect::from_center_size(
-                            divider.rect.center(),
-                            vec2(divider.rect.width(), 1.0),
-                        )
-                    } else {
-                        Rect::from_center_size(
-                            divider.rect.center(),
-                            vec2(1.0, divider.rect.height()),
-                        )
-                    };
-                    let color = if response.hovered() || response.dragged() {
-                        t.border
-                    } else {
-                        t.separator
-                    };
-                    ui.painter().rect_filled(line, 0.0, color);
-                    if let Some(pointer) = response.interact_pointer_pos()
-                        && response.dragged()
-                    {
-                        let at = if divider.stacked {
-                            pointer.y
-                        } else {
-                            pointer.x
-                        };
-                        moves.push((divider.path.clone(), divider.ratio_at(at, GAP)));
-                    }
-                }
-                for (path, ratio) in moves {
-                    if let Some(slot) = tab.root.ratio_mut(&path) {
-                        *slot = ratio;
-                    }
-                }
-                // A tab or a pane dragged over a pane shows where it would land.
-                if let Some(drag) = self.drag
-                    && let Some(pointer) = ctx.pointer_interact_pos()
-                    && let Some((pane, rect)) = tab
-                        .root
-                        .leaves()
-                        .into_iter()
-                        .zip(rects.iter())
-                        .find(|(_, r)| r.contains(pointer))
-                    && match drag {
-                        // The tab of this very terminal dragged on its panes splits them with a new shell.
-                        Drag::Tab(_) => true,
-                        Drag::Pane(id) => id != pane.id,
-                    }
-                {
-                    let (stacked, before, zone) = drop_zone(*rect, pointer);
-                    ui.painter()
-                        .rect_filled(zone, 4.0, t.accent.gamma_multiply(0.3));
-                    ui.painter().rect_stroke(
-                        zone,
-                        4.0,
-                        Stroke::new(1.5_f32, t.accent),
-                        StrokeKind::Inside,
-                    );
-                    drop = Some((pane.id, stacked, before));
-                }
-                ui.allocate_rect(full, Sense::hover());
-            });
-        for (pane, agent) in mcp_offers {
-            self.offer_mcp(pane, agent);
-        }
-        for (path, line, column) in file_links {
-            let (line, column) = (line.unwrap_or(1).max(1) - 1, column.unwrap_or(1).max(1) - 1);
-            builtin::Host::open_at(self, path, line, column, 0);
-        }
-        if let Some(stacked) = menu_split {
-            self.split_terminal(stacked);
-        }
-        if menu_close_pane {
-            self.close_pane();
-        }
-        if menu_close_tab {
-            self.close_terminal(self.active_terminal);
+        let mut drop = None;
+        if let Some(tab) = self.terminals.get_mut(self.active_terminal) {
+            let out = terminal_windows::draw_panes(
+                ui,
+                tab,
+                &mut self.drag,
+                &t,
+                &root,
+                ai_watch,
+                &self.terminal_error,
+                egui::Id::unique("terminal_panel"),
+            );
+            drop = out.drop;
+            self.panes_output(out, None);
+        } else if !self.terminal_error.is_empty() {
+            ui.colored_label(t.error, &self.terminal_error);
         }
         // Over the tab bar, a dragged tab is reordered and a dragged pane gets its own tab.
         let bar = Rect::from_min_max(
@@ -4952,7 +4742,31 @@ impl Ide {
                 );
             }
         }
-        if let Some(drag) = self.drag
+        // Out of the window, a dragged tab or pane goes into a window of its own.
+        let latest = ctx.input(|i| i.pointer.latest_pos());
+        let screen = ctx.content_rect();
+        let outside = latest.is_some_and(|p| !screen.shrink(2.0).contains(p));
+        if self.drag.is_some()
+            && outside
+            && let Some(p) = latest
+        {
+            let rect = Rect::from_min_size(
+                p.clamp(screen.min + vec2(8.0, 8.0), screen.max - vec2(230.0, 40.0)),
+                vec2(220.0, 30.0),
+            );
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Tooltip,
+                egui::Id::unique("terminal_drag_out"),
+            ));
+            painter.rect_filled(rect, 6.0, t.accent);
+            painter.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                tr!("open_in_new_window"),
+                ui::semibold(13.0),
+                Color32::WHITE,
+            );
+        } else if let Some(drag) = self.drag
             && let Some(pointer) = pointer
         {
             // A label follows the pointer.
@@ -4982,6 +4796,26 @@ impl Ide {
         if ctx.input(|i| i.pointer.any_released())
             && let Some(drag) = self.drag.take()
         {
+            if outside {
+                let origin = ctx.input(|i| i.viewport().inner_rect.map(|r| r.min));
+                let position = origin
+                    .zip(latest)
+                    .map(|(o, p)| o + p.to_vec2() - vec2(40.0, 20.0));
+                match drag {
+                    Drag::Tab(from) => self.detach_terminal(from, position),
+                    Drag::Pane(id) => {
+                        // A pane alone in its tab takes the tab with it.
+                        let count = self.terminals.get(self.active_terminal).map(|t| t.count());
+                        if count.is_some_and(|c| c > 1) {
+                            self.pane_to_tab(id);
+                            self.detach_terminal(self.terminals.len() - 1, position);
+                        } else {
+                            self.detach_terminal(self.active_terminal, position);
+                        }
+                    }
+                }
+                return;
+            }
             match (drag, drop) {
                 (Drag::Tab(from), Some((target, stacked, before)))
                     if from == self.active_terminal =>
@@ -5291,6 +5125,13 @@ impl Ide {
                     );
                     return;
                 }
+                // A diff: the file before and after, in editors of their own.
+                if let Some(diff) = &mut doc.diff {
+                    let highlight = !uncolored.contains(&diff.language());
+                    let font = FontId::monospace(self.settings.font_size);
+                    diff.show(ui, &t, font, highlight);
+                    return;
+                }
                 let mut find_action = self
                     .find_request
                     .take()
@@ -5504,6 +5345,8 @@ impl Ide {
                     sticky_lines: !self.settings.sticky_lines_off,
                     breadcrumbs: !self.settings.breadcrumbs_off,
                     spellcheck: !self.settings.spellcheck_off,
+                    line_colors: &[],
+                    line_numbers: true,
                 };
                 let editor_id = egui::Id::unique(("source", doc.path.clone(), self.active));
                 let output = doc.view.show(ui, editor_id, &mut doc.text, &options);
@@ -7758,31 +7601,17 @@ fn tab_usage(tab: &TerminalTab) -> Option<String> {
     total.map(|(memory, cpu)| crate::stats::format_usage(memory, cpu))
 }
 
-/// Where a tab dropped on `rect` goes: (stacked, before, highlighted area). The outer parts
-/// of the pane split it on that side, the middle splits it to the right.
+/// Where a tab dropped on `rect` goes: (stacked, before, highlighted area). The pane splits on
+/// the side nearest to the pointer, as a group of the editor does on its edges.
 fn drop_zone(rect: Rect, pointer: egui::Pos2) -> (bool, bool, Rect) {
-    let x = (pointer.x - rect.left()) / rect.width().max(1.0);
-    let y = (pointer.y - rect.top()) / rect.height().max(1.0);
-    let (left, top) = (rect.min, rect.min);
-    let half_w = vec2(rect.width() / 2.0, rect.height());
-    let half_h = vec2(rect.width(), rect.height() / 2.0);
-    if x < 0.3 {
-        (false, true, Rect::from_min_size(left, half_w))
-    } else if x > 0.7 {
-        (
-            false,
-            false,
-            Rect::from_min_size(pos2(rect.center().x, rect.top()), half_w),
-        )
-    } else if y < 0.5 {
-        (true, true, Rect::from_min_size(top, half_h))
-    } else {
-        (
-            true,
-            false,
-            Rect::from_min_size(pos2(rect.left(), rect.center().y), half_h),
-        )
-    }
+    let side = groups::Side::edge(rect, pointer);
+    let (stacked, before) = match side {
+        groups::Side::Left => (false, true),
+        groups::Side::Top => (true, true),
+        groups::Side::Bottom => (true, false),
+        groups::Side::Right | groups::Side::Center => (false, false),
+    };
+    (stacked, before, side.area(rect))
 }
 
 #[derive(Default)]
@@ -7816,6 +7645,22 @@ impl Host for Ide {
     }
     fn open_file(&mut self, path: PathBuf) {
         Ide::open_file(self, path);
+    }
+    fn open_diff(&mut self, request: crate::diff_tab::DiffRequest) {
+        let tab = crate::diff_tab::DiffTab::new(request);
+        // The same diff opened again comes back to its tab, as a file does.
+        let title = tab.title();
+        if let Some(i) = self.documents.iter().position(|d| {
+            d.diff
+                .as_ref()
+                .is_some_and(|diff| diff.title() == title && diff.path == tab.path)
+        }) {
+            self.documents[i] = project::Document::diff(tab);
+            self.active = i;
+            return;
+        }
+        self.documents.push(project::Document::diff(tab));
+        self.active = self.documents.len() - 1;
     }
     fn run_configuration(&mut self, name: String, command: String) {
         self.run_temporary(&name, &command);
@@ -8048,6 +7893,10 @@ impl Ide {
                 );
             }
         }
+        // The terminal, once its shell started, in a window of its own.
+        if pass == 12 && std::env::var("ATELIER_SHOT_SPLIT").as_deref() == Ok("terminal_window") {
+            self.detach_terminal(self.active_terminal, None);
+        }
         // A language server needs a few seconds before it can answer.
         let slow = std::env::var_os("ATELIER_SHOT_CURSOR").is_some();
         if pass == if slow { 150 } else { 8 }
@@ -8147,7 +7996,10 @@ impl eframe::App for Ide {
                         .push(egui::Event::PointerMoved(a + (b - a) * f));
                 }
                 15..=22 => raw_input.events.push(egui::Event::PointerMoved(b)),
-                23 => raw_input.events.push(button(b, false)),
+                // `ATELIER_SHOT_HOLD=1`: still held for the picture, to show where it would drop.
+                23 if std::env::var_os("ATELIER_SHOT_HOLD").is_none() => {
+                    raw_input.events.push(button(b, false))
+                }
                 _ => {}
             }
             return;
@@ -8280,6 +8132,7 @@ impl eframe::App for Ide {
         self.editor(ui);
         self.group_drag_ui(ctx);
         self.editor_windows(ctx);
+        self.terminal_windows(ctx);
         self.dialogs(ctx);
         self.log_status();
         self.balloons(ctx);

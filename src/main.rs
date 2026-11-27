@@ -7,6 +7,7 @@ mod atelier;
 mod cli;
 mod crash;
 mod dev;
+mod diff_tab;
 mod editor;
 mod encoding;
 mod features;

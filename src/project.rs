@@ -53,9 +53,19 @@ pub struct Document {
     pub language: String,
     /// Editor view state: line index, caret, undo history, highlighting.
     pub view: crate::editor::EditorState,
+    /// A diff shown in this tab instead of a file: never saved.
+    pub diff: Option<Box<crate::diff_tab::DiffTab>>,
 }
 
 impl Document {
+    /// A tab showing `diff`.
+    pub fn diff(diff: crate::diff_tab::DiffTab) -> Self {
+        Self {
+            read_only: true,
+            diff: Some(Box::new(diff)),
+            ..Self::untitled()
+        }
+    }
     pub fn untitled() -> Self {
         Self {
             loading: None,
@@ -69,6 +79,7 @@ impl Document {
             saved_encoding: TextEncoding::default(),
             language: "txt".into(),
             view: Default::default(),
+            diff: None,
         }
     }
     pub fn open(path: PathBuf) -> Result<Self> {
@@ -92,6 +103,7 @@ impl Document {
             saved_encoding: encoding,
             language,
             view: Default::default(),
+            diff: None,
         })
     }
     /// A file displayed by a plugin: nothing is read, the text stays empty.
@@ -135,6 +147,7 @@ impl Document {
             encoding: TextEncoding::default(),
             saved_encoding: TextEncoding::default(),
             view: Default::default(),
+            diff: None,
         })
     }
     /// Collects the result of the background read. Returns `Some(Err)` when it failed, in
@@ -251,6 +264,9 @@ impl Document {
         Ok(())
     }
     pub fn title(&self) -> String {
+        if let Some(diff) = &self.diff {
+            return diff.title();
+        }
         self.path
             .as_ref()
             .and_then(|p| p.file_name())
