@@ -2,6 +2,30 @@
 
 Every version of Atelier IDE. The entries come from the files of `.changeset/` (see [Versions & releases](https://atelier-ide-org.github.io/docs/contributing/releases)).
 
+## 0.6.1 (2026-11-28)
+
+### Fixes
+
+#### Les diffs s'ouvrent dans l'éditeur, comme un fichier
+
+Le diff d'une modification ou d'un commit ne s'ouvre plus dans une fenêtre à part, mais dans un onglet de l'éditeur, comme un fichier. **Côte à côte**, la version d'avant à gauche et celle d'après à droite sont deux vrais éditeurs en lecture seule, avec la coloration du langage et leurs vrais numéros de ligne : on peut y sélectionner et copier, et ils défilent ensemble, ligne en face de ligne. Entre les deux, comme dans IntelliJ, chaque changement de gauche est relié à sa place à droite par une bande de sa couleur, et une ligne marque dans l'autre éditeur l'endroit d'un ajout ou d'une suppression. Le diff s'ouvre sur son premier changement. En **unifié**, un seul éditeur montre les lignes supprimées au-dessus de celles qui les remplacent, avec les numéros de ligne d'avant et d'après. Les lignes ajoutées, supprimées et modifiées ont le fond de leur changement ; F7 et Maj+F7 vont d'une différence à l'autre, et la vue unifiée peut masquer les lignes identiques. Rouvrir le même diff revient à son onglet.
+
+#### Des fenêtres qui ne ferment plus l'IDE, un terminal dans sa fenêtre, un partage plus clair
+
+Fermer le dernier onglet d'une fenêtre ouverte avec **Ouvrir dans une nouvelle fenêtre** faisait planter tout l'IDE ; elle se ferme désormais seule, et les fichiers restent ouverts dans la fenêtre principale. Fermer le dernier onglet d'un partage de l'éditeur ne laisse plus de zone vide : l'éditeur principal reprend toute la place.
+
+Un onglet de terminal s'ouvre lui aussi dans une fenêtre à part : **Ouvrir dans une nouvelle fenêtre** dans le menu de son onglet, ou en le glissant (lui ou l'un de ses volets) hors de la fenêtre. Ses shells continuent d'y tourner, on peut la partager à droite ou en bas ; son bouton **Remettre dans le panneau Terminal**, ou simplement la fermer, le remet dans le panneau avec les mêmes shells.
+
+Une fenêtre de l'éditeur revient dans la fenêtre principale avec **Remettre dans la fenêtre principale** (menu d'un de ses onglets), ses partages tels quels. Un onglet glissé d'une fenêtre de l'IDE à une autre s'y dépose, au milieu ou sur le côté visé, au lieu d'ouvrir une nouvelle fenêtre.
+
+Le partage se comporte de la même façon dans l'éditeur et le terminal : la zone où l'onglet va se poser est surlignée avec ce qu'il va faire (« Partager à gauche », « Ouvrir ici »…). Les séparateurs se saisissent plus facilement, suivent la souris sans sauter, et un double-clic redonne la même taille aux deux côtés.
+
+#### Moins de mémoire, et le texte des champs de recherche à côté de la loupe
+
+L'historique d'annulation d'un fichier est désormais borné (10 000 étapes, 32 Mo de texte) : chaque reformatage ou collage gardait une copie du texte remplacé, et un fichier modifié toute une journée faisait grossir la mémoire sans fin. Les blocs de code de l'aperçu Markdown et des notebooks Jupyter partagent la même coloration syntaxique, au lieu de la recharger pour chaque notebook ou à chaque fermeture d'un fichier Markdown. Les polices de secours du système (Nerd Font, symboles) ne sont plus copiées à chaque changement de police.
+
+Le texte tapé dans les champs de recherche ne passe plus sous la loupe à gauche, et le message de commit Git retrouve sa marge.
+
 ## 0.6.0 (2026-11-25)
 
 ### Breaking Changes
