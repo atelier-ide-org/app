@@ -319,18 +319,12 @@ fn install_fonts(ctx: &egui::Context, choice: &Fonts) {
     // after the code font, and the symbols of the system last.
     static FALLBACKS: OnceLock<Fallbacks> = OnceLock::new();
     let (nerd, symbols) = FALLBACKS.get_or_init(system_fallbacks);
-    if let Some(bytes) = nerd {
-        fonts.font_data.insert(
-            "Nerd Font".into(),
-            Arc::new(FontData::from_owned(bytes.clone())),
-        );
+    if let Some(font) = nerd {
+        fonts.font_data.insert("Nerd Font".into(), font.clone());
         mono.insert(first_fallback, "Nerd Font".into());
     }
-    if let Some(bytes) = symbols {
-        fonts.font_data.insert(
-            "Symbols".into(),
-            Arc::new(FontData::from_owned(bytes.clone())),
-        );
+    if let Some(font) = symbols {
+        fonts.font_data.insert("Symbols".into(), font.clone());
         mono.push("Symbols".into());
     }
     fonts.families.insert(FontFamily::Monospace, mono);
@@ -348,8 +342,9 @@ pub fn installed_fonts() -> (u64, Option<Arc<FontDefinitions>>) {
     INSTALLED_FONTS.lock().expect("fonts").clone()
 }
 
-/// A Nerd Font and a font of symbols of the system, when they are there.
-type Fallbacks = (Option<Vec<u8>>, Option<Vec<u8>>);
+/// A Nerd Font and a font of symbols of the system, when they are there. Shared, not copied,
+/// by every installation of the fonts: they weigh megabytes.
+type Fallbacks = (Option<Arc<FontData>>, Option<Arc<FontData>>);
 
 /// A Nerd Font installed on the machine (the monospaced regular one first) and a font of
 /// symbols of the system (Segoe UI Symbol on Windows), when they are there.
@@ -410,7 +405,8 @@ fn system_fallbacks() -> Fallbacks {
         .iter()
         .find(|p| name(p) == "seguisym.ttf")
         .and_then(|p| std::fs::read(p).ok());
-    (nerd, symbols)
+    let shared = |bytes: Vec<u8>| Arc::new(FontData::from_owned(bytes));
+    (nerd.map(shared), symbols.map(shared))
 }
 
 /// Applies a theme to egui. Fonts are installed on first use.
@@ -819,14 +815,15 @@ pub fn search_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> R
     let (rect, _) = ui.allocate_exact_size(vec2(width, 28.0), Sense::hover());
     let edit = egui::TextEdit::singleline(text)
         .hint_text(hint)
-        .frame(egui::Frame::NONE)
-        .align(egui::Align2::LEFT_CENTER)
-        .margin(egui::Margin {
+        // egui ignores `TextEdit::margin` once a frame is given: the padding that keeps
+        // the text clear of the magnifier must be the frame's own inner margin.
+        .frame(egui::Frame::NONE.inner_margin(egui::Margin {
             left: 28,
             right: 8,
             top: 0,
             bottom: 0,
-        });
+        }))
+        .align(egui::Align2::LEFT_CENTER);
     let response = ui.put(rect, edit);
     let border = if response.has_focus() {
         t.accent

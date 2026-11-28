@@ -4,7 +4,7 @@ mod views;
 
 use super::{
     conflict::{self, Segment},
-    diff::{self, Row},
+    diff,
     graph::{self, GraphRow},
     repo::{
         self, Branch, Change, Commit, Console, Head, Kind, LogQuery, Remote, Repo, Stash, State,
@@ -194,47 +194,6 @@ enum DiffSource {
     },
 }
 
-struct DiffView {
-    path: String,
-    left_title: String,
-    right_title: String,
-    old: String,
-    new: String,
-    binary: bool,
-    side_by_side: bool,
-    collapse: bool,
-    rows: Vec<Row>,
-    starts: Vec<usize>,
-    current: usize,
-    scroll_to: Option<usize>,
-}
-
-impl DiffView {
-    fn rebuild(&mut self) {
-        let context = self.collapse.then_some(4);
-        self.rows = if self.side_by_side {
-            diff::side_by_side(&self.old, &self.new, context)
-        } else {
-            diff::unified(&self.old, &self.new, context)
-        };
-        self.starts = diff::change_starts(&self.rows);
-        self.current = 0;
-        self.scroll_to = self.starts.first().copied();
-    }
-    fn step(&mut self, forward: bool) {
-        if self.starts.is_empty() {
-            return;
-        }
-        let n = self.starts.len();
-        self.current = if forward {
-            (self.current + 1) % n
-        } else {
-            (self.current + n - 1) % n
-        };
-        self.scroll_to = Some(self.starts[self.current]);
-    }
-}
-
 struct Resolver {
     path: String,
     segments: Vec<Segment>,
@@ -303,7 +262,6 @@ pub struct GitPlugin {
     log_tab: LogTab,
     log: Log,
     // Windows.
-    diff: Option<DiffView>,
     resolver: Option<Resolver>,
     dialog: Option<Dialog>,
     branch_filter: String,
@@ -327,7 +285,7 @@ pub struct GitPlugin {
     /// hundred milliseconds on Windows, too long for the thread of the window.
     base_jobs: HashMap<PathBuf, JoinHandle<Option<String>>>,
     /// A diff being read and computed, shown when it is ready.
-    diff_job: Option<JoinHandle<DiffView>>,
+    diff_job: Option<JoinHandle<crate::diff_tab::DiffRequest>>,
 }
 
 impl Default for GitPlugin {
@@ -368,7 +326,6 @@ impl Default for GitPlugin {
                 },
                 ..Default::default()
             },
-            diff: None,
             resolver: None,
             dialog: None,
             branch_filter: String::new(),
@@ -581,9 +538,10 @@ impl GitPlugin {
             }
         }
         if self.diff_job.as_ref().is_some_and(JoinHandle::is_finished)
-            && let Some(Ok(view)) = self.diff_job.take().map(JoinHandle::join)
+            && let Some(Ok(request)) = self.diff_job.take().map(JoinHandle::join)
         {
-            self.diff = Some(view);
+            // In a tab of the editor, as a file: side by side or unified.
+            host.open_diff(request);
             ctx.request_repaint();
         }
         let finished: Vec<_> = self
@@ -1341,8 +1299,6 @@ impl GitPlugin {
         let Some(repo) = self.repo.clone() else {
             return;
         };
-        let side_by_side = self.diff.as_ref().is_none_or(|d| d.side_by_side);
-        let collapse = self.diff.as_ref().is_some_and(|d| d.collapse);
         // `git show` and the diff itself run in the background; the view opens when ready.
         self.diff_job = Some(thread::spawn(move || {
             let (change, old, new, left_title, right_title) = match source {
@@ -1372,22 +1328,13 @@ impl GitPlugin {
                     (change, old, new, left, short(&to))
                 }
             };
-            let mut view = DiffView {
+            crate::diff_tab::DiffRequest {
                 path: change.path,
                 left_title,
                 right_title,
-                binary: old.contains('\0') || new.contains('\0'),
                 old,
                 new,
-                side_by_side,
-                collapse,
-                rows: Vec::new(),
-                starts: Vec::new(),
-                current: 0,
-                scroll_to: None,
-            };
-            view.rebuild();
-            view
+            }
         }));
     }
 
@@ -1560,14 +1507,6 @@ impl BuiltinPlugin for GitPlugin {
         if pressed(Modifiers::ALT, Key::Num9) {
             host.show_tool_window(LOG_WINDOW);
         }
-        if let Some(diff) = &mut self.diff {
-            if pressed(Modifiers::SHIFT, Key::F7) {
-                diff.step(false);
-            }
-            if pressed(Modifiers::NONE, Key::F7) {
-                diff.step(true);
-            }
-        }
     }
 
     fn file_saved(&mut self, _path: &Path) {
@@ -1591,7 +1530,6 @@ impl BuiltinPlugin for GitPlugin {
     }
 
     fn windows(&mut self, ctx: &egui::Context, host: &mut dyn Host) {
-        self.diff_window(ctx);
         self.resolver_window(ctx, host);
         self.dialog_window(ctx, host);
         self.branch_popup_window(ctx, host);

@@ -1,7 +1,7 @@
 //! Layout of the panes of a terminal tab: a binary tree of splits, as IntelliJ nests them.
 //! Each split is side by side or stacked and has a ratio the user drags.
 
-use eframe::egui::{Rect, pos2, vec2};
+use eframe::egui::{self, Color32, Rect, Sense, pos2, vec2};
 
 pub enum Node<T> {
     Leaf(T),
@@ -25,6 +25,8 @@ pub struct Divider {
     pub stacked: bool,
     /// Area of the whole split, to turn a pointer position into a ratio.
     pub area: Rect,
+    /// Share of the first child now.
+    pub ratio: f32,
 }
 
 pub const MIN_RATIO: f32 = 0.1;
@@ -205,6 +207,7 @@ impl<T> Node<T> {
                     rect: line,
                     stacked: *stacked,
                     area: rect,
+                    ratio: *ratio,
                 });
                 path.push(false);
                 first.place(a, gap, path, rects, dividers);
@@ -217,15 +220,67 @@ impl<T> Node<T> {
     }
 }
 
+/// Width of the area that grabs a divider, whatever the gap drawn between the two sides.
+const GRAB: f32 = 10.0;
+
 impl Divider {
-    /// Ratio of the split when the divider is dragged to `pointer` (x or y by orientation).
-    pub fn ratio_at(&self, pointer: f32, gap: f32) -> f32 {
-        let (start, length) = if self.stacked {
-            (self.area.top(), self.area.height())
+    /// The ratio after dragging the divider by `delta` (along its axis): it follows the pointer
+    /// from where it was grabbed, without jumping to it.
+    pub fn ratio_moved(&self, delta: f32, gap: f32) -> f32 {
+        let length = if self.stacked {
+            self.area.height()
         } else {
-            (self.area.left(), self.area.width())
+            self.area.width()
         };
-        ((pointer - start - gap / 2.0) / (length - gap).max(1.0)).clamp(MIN_RATIO, 1.0 - MIN_RATIO)
+        (self.ratio + delta / (length - gap).max(1.0)).clamp(MIN_RATIO, 1.0 - MIN_RATIO)
+    }
+
+    /// Draws the divider as a thin line, `idle` or `active` while the pointer is on it, and
+    /// lets it be dragged; a double click gives both sides the same size. Returns the new ratio.
+    pub fn show(
+        &self,
+        ui: &mut egui::Ui,
+        id: egui::Id,
+        gap: f32,
+        idle: Color32,
+        active: Color32,
+    ) -> Option<f32> {
+        let grab = if self.stacked {
+            Rect::from_center_size(self.rect.center(), vec2(self.rect.width(), GRAB.max(gap)))
+        } else {
+            Rect::from_center_size(self.rect.center(), vec2(GRAB.max(gap), self.rect.height()))
+        };
+        let response = ui.interact(grab, id, Sense::click_and_drag());
+        let hot = response.hovered() || response.dragged();
+        if hot {
+            ui.ctx().set_cursor_icon(if self.stacked {
+                egui::CursorIcon::ResizeVertical
+            } else {
+                egui::CursorIcon::ResizeHorizontal
+            });
+        }
+        let thickness = if hot { 2.0 } else { 1.0 };
+        let line = if self.stacked {
+            Rect::from_center_size(self.rect.center(), vec2(self.rect.width(), thickness))
+        } else {
+            Rect::from_center_size(self.rect.center(), vec2(thickness, self.rect.height()))
+        };
+        if hot || idle != Color32::TRANSPARENT {
+            ui.painter()
+                .rect_filled(line, 0.0, if hot { active } else { idle });
+        }
+        if response.double_clicked() {
+            return Some(0.5);
+        }
+        let response = response.on_hover_text(crate::i18n::t("reset_split"));
+        if response.dragged() {
+            let delta = response.drag_delta();
+            let delta = if self.stacked { delta.y } else { delta.x };
+            if delta != 0.0 {
+                return Some(self.ratio_moved(delta, gap));
+            }
+        }
+        None
     }
 }
 

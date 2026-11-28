@@ -65,6 +65,14 @@ impl Side {
         if (0.3..=0.7).contains(&x) && (0.3..=0.7).contains(&y) {
             return Side::Center;
         }
+        Side::edge(rect, p)
+    }
+
+    /// The edge of `rect` nearest to the pointer: where a terminal pane dropped there goes, as
+    /// a tab dropped on the edge of a group of the editor does.
+    pub fn edge(rect: Rect, p: egui::Pos2) -> Side {
+        let x = (p.x - rect.left()) / rect.width().max(1.0);
+        let y = (p.y - rect.top()) / rect.height().max(1.0);
         let edges = [
             (x, Side::Left),
             (1.0 - x, Side::Right),
@@ -78,7 +86,7 @@ impl Side {
     }
 
     /// The part of `rect` the dropped tab will take.
-    fn area(self, rect: Rect) -> Rect {
+    pub fn area(self, rect: Rect) -> Rect {
         let c = rect.center();
         match self {
             Side::Center => rect,
@@ -192,6 +200,27 @@ impl Ide {
         });
     }
 
+    /// The window of its own `group` is in goes back into the main window, its groups as they
+    /// were, to the right of the main group.
+    pub(super) fn attach_window(&mut self, group: u64) {
+        let Some(w) = self
+            .windows
+            .iter()
+            .position(|w| w.layout.contains(&|g: &u64| *g == group))
+        else {
+            return;
+        };
+        let window = self.windows.remove(w);
+        let ids: Vec<u64> = window.layout.leaves().into_iter().copied().collect();
+        if !self
+            .editor_layout
+            .split_with(&|g: &u64| *g == MAIN, false, false, window.layout)
+        {
+            // No main group to go beside: its groups go, their files stay open.
+            self.groups.retain(|g| !ids.contains(&g.id));
+        }
+    }
+
     /// Open in New Window of the menu of a tab of the main group.
     pub(super) fn detach(&mut self, index: usize, position: Option<egui::Pos2>) {
         let Some(doc) = self.documents.get(index) else {
@@ -205,7 +234,11 @@ impl Ide {
         self.open_window_with(path, cursor, position);
     }
 
-    /// Takes tab `index` out of group `id`; the group goes away when it has no tab left.
+    /// Takes tab `index` out of group `id`. A group left without tabs goes away with the next
+    /// [`Ide::prune_groups`], before anything is drawn: not here, which may run while its layout
+    /// is being drawn, out of its place. Removed then, the group stayed in that layout as an
+    /// empty island, and the window being drawn went away under its own feet: closing the last
+    /// tab of a window of its own took the whole IDE down (index out of bounds).
     fn take_tab(&mut self, id: u64, index: usize) -> Option<SplitPane> {
         let group = self.group_mut(id)?;
         if index >= group.tabs.len() {
@@ -213,9 +246,6 @@ impl Ide {
         }
         let pane = group.tabs.remove(index);
         group.active = group.active.min(group.tabs.len().saturating_sub(1));
-        if group.tabs.is_empty() {
-            self.remove_group(id);
-        }
         Some(pane)
     }
 
@@ -294,6 +324,10 @@ impl Ide {
                 painter.rect_filled(island, radius, t.island);
             }
         }
+        // Where the window is on the screen: a tab dragged from another window finds its groups.
+        if let Some(origin) = ui.ctx().input(|i| i.viewport().inner_rect.map(|r| r.min)) {
+            self.viewport_origins.insert(viewport, origin);
+        }
         let targets = self.drop_targets.entry(viewport).or_default();
         targets.clear();
         targets.extend(ids.iter().copied().zip(rects.iter().copied()));
@@ -301,32 +335,20 @@ impl Ide {
             if *id == MAIN {
                 main = Some(*area);
             } else {
-                self.group_ui(ui, *id, *area);
+                self.group_ui(ui, *id, *area, window.is_some());
             }
         }
         // Dragging a divider changes the share of the two sides.
         let mut moves = Vec::new();
         for divider in &dividers {
-            let response = ui.interact(
-                divider.rect.expand(2.0),
+            if let Some(ratio) = divider.show(
+                ui,
                 egui::Id::unique(("editor_divider", viewport, divider.path.clone())),
-                Sense::drag(),
-            );
-            let icon = if divider.stacked {
-                egui::CursorIcon::ResizeVertical
-            } else {
-                egui::CursorIcon::ResizeHorizontal
-            };
-            if response.hovered() || response.dragged() {
-                ui.ctx().set_cursor_icon(icon);
-                ui.painter()
-                    .rect_filled(divider.rect, 0.0, t.accent.gamma_multiply(0.5));
-            }
-            if response.dragged()
-                && let Some(p) = response.interact_pointer_pos()
-            {
-                let at = if divider.stacked { p.y } else { p.x };
-                moves.push((divider.path.clone(), divider.ratio_at(at, GAP)));
+                GAP,
+                Color32::TRANSPARENT,
+                t.accent,
+            ) {
+                moves.push((divider.path.clone(), ratio));
             }
         }
         for (path, ratio) in moves {
@@ -342,7 +364,7 @@ impl Ide {
     }
 
     /// A group other than the main one: its tabs, then the editor of the active one.
-    fn group_ui(&mut self, ui: &mut egui::Ui, id: u64, rect: Rect) {
+    fn group_ui(&mut self, ui: &mut egui::Ui, id: u64, rect: Rect, in_window: bool) {
         let t = self.theme(ui.ctx());
         let Some(gi) = self.groups.iter().position(|g| g.id == id) else {
             return;
@@ -465,6 +487,19 @@ impl Ide {
                     action = Some((i, GroupAction::Window));
                     ui.close();
                 }
+                if in_window
+                    && ui::menu_item(
+                        ui,
+                        Some("winRestore"),
+                        tr!("move_to_main_window"),
+                        None,
+                        false,
+                    )
+                    .clicked()
+                {
+                    action = Some((i, GroupAction::Attach));
+                    ui.close();
+                }
                 ui::menu_separator(ui);
                 if ui::menu_item(ui, Some("closeSmall"), tr!("close"), None, false).clicked() {
                     close = Some(i);
@@ -517,21 +552,35 @@ impl Ide {
                     self.take_tab(id, i);
                     self.open_window_with(path, cursor, None);
                 }
+                // Its window is being drawn: it goes back once all are.
+                GroupAction::Attach => self.attach_requests.push(id),
             }
         }
     }
 
     /// Ends or shows the drag of a tab in the window of `viewport`: the side of the group under
-    /// the pointer, or a window of its own when the pointer is out of the window.
+    /// the pointer, in this window or in another window of the IDE the pointer is over, or a
+    /// window of its own when the pointer is over none of them.
     pub(super) fn group_drag_ui(&mut self, ctx: &egui::Context) {
         let viewport = ctx.viewport_id();
+        let t = self.theme(ctx);
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::unique("group_drop"),
+        ));
         let Some((drag, from)) = self.tab_drag else {
             return;
         };
         if from != viewport {
+            // A tab dragged in another window over this one: where it would land here.
+            if let Some((v, group, side)) = self.cross_drop
+                && v == viewport
+                && let Some(rect) = self.target_rect(viewport, group)
+            {
+                paint_drop(&painter, &t, side, rect);
+            }
             return;
         }
-        let t = self.theme(ctx);
         let latest = ctx.input(|i| i.pointer.latest_pos());
         let screen = ctx.content_rect();
         let outside = latest.is_some_and(|p| !screen.shrink(2.0).contains(p));
@@ -548,27 +597,30 @@ impl Ide {
                 .find(|(_, r)| r.contains(p))
                 .map(|(g, r)| (*g, *r, Side::at(*r, p)))
         });
-        let painter = ctx.layer_painter(egui::LayerId::new(
-            egui::Order::Foreground,
-            egui::Id::unique("group_drop"),
-        ));
-        if let Some((group, rect, side)) = target {
-            // Dropped in its own group's middle, a tab stays where it is.
-            let same = matches!((drag, group), (TabDrag::Group(g, _), t) if g == t)
-                && side == Side::Center
-                || matches!(drag, TabDrag::Main(_)) && group == MAIN && side == Side::Center;
-            if !same {
-                let area = side.area(rect).shrink(4.0);
-                painter.rect(
-                    area,
-                    6.0,
-                    t.accent.gamma_multiply(0.18),
-                    Stroke::new(2.0_f32, t.accent),
-                    StrokeKind::Inside,
-                );
+        // Out of this window, over another one of the IDE: a group of that window.
+        let origin = ctx.input(|i| i.viewport().inner_rect.map(|r| r.min));
+        let cross = if outside {
+            origin
+                .zip(latest)
+                .and_then(|(o, p)| self.window_target(o + p.to_vec2(), viewport))
+        } else {
+            None
+        };
+        if cross != self.cross_drop {
+            for v in [cross, self.cross_drop].into_iter().flatten().map(|c| c.0) {
+                ctx.request_repaint_of(v);
             }
+            self.cross_drop = cross;
         }
-        if outside && let Some(p) = latest {
+        if let Some((group, rect, side)) = target
+            && !stays(drag, group, side)
+        {
+            paint_drop(&painter, &t, side, rect);
+        }
+        if outside
+            && cross.is_none()
+            && let Some(p) = latest
+        {
             let rect = Rect::from_min_size(
                 p.clamp(screen.min + vec2(8.0, 8.0), screen.max - vec2(230.0, 40.0)),
                 vec2(220.0, 30.0),
@@ -587,6 +639,9 @@ impl Ide {
             return;
         }
         self.tab_drag = None;
+        if let Some((v, _, _)) = self.cross_drop.take() {
+            ctx.request_repaint_of(v);
+        }
         if !released && !outside {
             return;
         }
@@ -604,23 +659,31 @@ impl Ide {
                 .map(|p| (p.path.clone(), p.view.cursor)),
         };
         let Some((path, cursor)) = source else { return };
+        if let Some((_, group, side)) = cross {
+            self.drop_tab(drag, path, cursor, group, side);
+        } else if outside {
+            let position = origin
+                .zip(latest)
+                .map(|(o, p)| o + p.to_vec2() - vec2(40.0, 20.0));
+            if let TabDrag::Group(g, i) = drag {
+                self.take_tab(g, i);
+            }
+            self.open_window_with(path, cursor, position);
+        } else if let Some((group, _, side)) = target {
+            self.drop_tab(drag, path, cursor, group, side);
+        }
+    }
+
+    /// The tab `drag` (showing `path` at `cursor`) dropped on `side` of `group`, in any window.
+    fn drop_tab(&mut self, drag: TabDrag, path: PathBuf, cursor: usize, group: u64, side: Side) {
+        if stays(drag, group, side) {
+            return;
+        }
         // A tab of another group moves: it leaves its group.
         let take = |ide: &mut Ide| {
             if let TabDrag::Group(g, i) = drag {
                 ide.take_tab(g, i);
             }
-        };
-        if outside {
-            let origin = ctx.input(|i| i.viewport().inner_rect.map(|r| r.min));
-            let position = origin
-                .zip(latest)
-                .map(|(o, p)| o + p.to_vec2() - vec2(40.0, 20.0));
-            take(self);
-            self.open_window_with(path, cursor, position);
-            return;
-        }
-        let Some((group, _, side)) = target else {
-            return;
         };
         match (side, group) {
             (Side::Center, MAIN) => {
@@ -634,9 +697,6 @@ impl Ide {
                 }
             }
             (Side::Center, g) => {
-                if matches!(drag, TabDrag::Group(from, _) if from == g) {
-                    return;
-                }
                 take(self);
                 if let Some(target) = self.group_mut(g) {
                     match target.tabs.iter().position(|p| p.path == path) {
@@ -659,6 +719,39 @@ impl Ide {
                 self.split_group(g, path, cursor, side);
             }
         }
+    }
+
+    /// The group of a window of the IDE other than `except` under `point` (on the screen), and
+    /// the side of it the point is on. The windows of their own first: they are over the main
+    /// one.
+    fn window_target(
+        &self,
+        point: egui::Pos2,
+        except: ViewportId,
+    ) -> Option<(ViewportId, u64, Side)> {
+        let mut viewports: Vec<ViewportId> = self.windows.iter().map(|w| w.id).collect();
+        viewports.push(ViewportId::ROOT);
+        viewports
+            .into_iter()
+            .filter(|v| *v != except)
+            .find_map(|v| {
+                let origin = *self.viewport_origins.get(&v)?;
+                let local = point - origin.to_vec2();
+                self.drop_targets
+                    .get(&v)?
+                    .iter()
+                    .find(|(_, r)| r.contains(local))
+                    .map(|(g, r)| (v, *g, Side::at(*r, local)))
+            })
+    }
+
+    /// Where group `group` is drawn in the window of `viewport`.
+    fn target_rect(&self, viewport: ViewportId, group: u64) -> Option<Rect> {
+        self.drop_targets
+            .get(&viewport)?
+            .iter()
+            .find(|(g, _)| *g == group)
+            .map(|(_, r)| *r)
     }
 
     /// The windows of their own, each with its groups.
@@ -719,12 +812,58 @@ impl Ide {
             let ids: Vec<u64> = window.layout.leaves().into_iter().copied().collect();
             self.groups.retain(|g| !ids.contains(&g.id));
         }
+        for group in std::mem::take(&mut self.attach_requests) {
+            self.attach_window(group);
+        }
+        // The places of the windows closed since: a tab dropped there finds nothing.
+        let open: Vec<ViewportId> = self
+            .windows
+            .iter()
+            .map(|w| w.id)
+            .chain([ViewportId::ROOT])
+            .collect();
+        self.drop_targets.retain(|v, _| open.contains(v));
+        self.viewport_origins.retain(|v, _| open.contains(v));
     }
+}
+
+/// Whether a tab dropped on `side` of `group` stays where it is: in the middle of its own group.
+fn stays(drag: TabDrag, group: u64, side: Side) -> bool {
+    side == Side::Center
+        && match drag {
+            TabDrag::Group(g, _) => g == group,
+            TabDrag::Main(_) => group == MAIN,
+        }
+}
+
+/// Shows where a dropped tab will go: the part of `rect` it takes, and what it does there.
+pub(super) fn paint_drop(painter: &egui::Painter, t: &ui::Theme, side: Side, rect: Rect) {
+    let area = side.area(rect).shrink(4.0);
+    painter.rect(
+        area,
+        6.0,
+        t.accent.gamma_multiply(0.18),
+        Stroke::new(2.0_f32, t.accent),
+        StrokeKind::Inside,
+    );
+    let label = match side {
+        Side::Center => tr!("drop_here"),
+        Side::Left => tr!("drop_split_left"),
+        Side::Right => tr!("drop_split_right"),
+        Side::Top => tr!("drop_split_up"),
+        Side::Bottom => tr!("drop_split_down"),
+    };
+    let galley = painter.layout_no_wrap(label.into(), ui::semibold(13.0), Color32::WHITE);
+    let chip = Rect::from_center_size(area.center(), galley.size() + vec2(20.0, 10.0));
+    painter.rect_filled(chip, 6.0, t.accent);
+    painter.galley(chip.center() - galley.size() / 2.0, galley, Color32::WHITE);
 }
 
 enum GroupAction {
     Split(Side),
     Window,
+    /// The whole window of the group back into the main window.
+    Attach,
 }
 
 fn file_name(path: &Path) -> String {

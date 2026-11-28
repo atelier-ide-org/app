@@ -137,6 +137,8 @@ fn frame(state: &mut EditorState, service: &Service, doc: &DocRef, text: &str) {
         breadcrumbs: false,
         bookmarks: &[],
         spellcheck: false,
+        line_colors: &[],
+        line_numbers: true,
     };
     ctx.run_ui(Default::default(), |ui| {
         egui::CentralPanel::default().show(ui, |ui| state.assist_frame(ui, text, &options));
@@ -666,6 +668,8 @@ fn click_frame(
         breadcrumbs: false,
         bookmarks: &[],
         spellcheck: false,
+        line_colors: &[],
+        line_numbers: true,
     };
     ctx.run_ui(Default::default(), |ui| {
         egui::CentralPanel::default()

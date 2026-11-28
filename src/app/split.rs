@@ -106,6 +106,8 @@ pub fn show(
         breadcrumbs: has_assist && !settings.breadcrumbs_off,
         bookmarks: &[],
         spellcheck: !settings.spellcheck_off,
+        line_colors: &[],
+        line_numbers: true,
     };
     let id = egui::Id::unique(("split_source", doc.path.clone()));
     egui::Frame::new()

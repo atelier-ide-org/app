@@ -182,6 +182,8 @@ pub trait Host {
         let colon = tr!("text");
         self.notify(format!("{prefix}{title}{colon}{text}"));
     }
+    /// Shows a diff in a tab of the editor (the Git plugin, for a change or a commit).
+    fn open_diff(&mut self, _request: crate::diff_tab::DiffRequest) {}
 }
 
 #[allow(unused_variables)]
