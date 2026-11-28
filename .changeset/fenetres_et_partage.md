@@ -1,5 +1,5 @@
 ---
-default: minor
+default: patch
 ---
 
 # Des fenêtres qui ne ferment plus l'IDE, un terminal dans sa fenêtre, un partage plus clair

@@ -1,5 +1,5 @@
 ---
-default: minor
+default: patch
 ---
 
 # Les diffs s'ouvrent dans l'éditeur, comme un fichier
